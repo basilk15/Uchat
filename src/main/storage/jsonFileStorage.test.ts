@@ -1,0 +1,133 @@
+import { mkdtemp, rm } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { afterEach, describe, expect, it } from 'vitest';
+import { JsonFileStorage } from './jsonFileStorage';
+import { StorageError } from './types';
+
+const tempDirs: string[] = [];
+
+const createStorage = async (): Promise<JsonFileStorage> => {
+  const directory = await mkdtemp(join(tmpdir(), 'uchat-storage-'));
+  tempDirs.push(directory);
+  return new JsonFileStorage(join(directory, 'storage.json'));
+};
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
+
+describe('JsonFileStorage', () => {
+  it('persists profile and room settings across storage instances', async () => {
+    const storage = await createStorage();
+    const filePath = join(tempDirs[0], 'storage.json');
+
+    await storage.setProfile({ displayName: 'Ada', status: 'busy' });
+    await storage.setRoom({
+      roomName: 'Lab',
+      joined: true,
+      udpPort: 49001,
+      tcpPort: 49002
+    });
+    await storage.close();
+
+    const reopened = new JsonFileStorage(filePath);
+    const state = await reopened.getAppState();
+
+    expect(state.profile).toEqual({ displayName: 'Ada', status: 'busy' });
+    expect(state.room).toEqual({
+      roomName: 'Lab',
+      joined: true,
+      udpPort: 49001,
+      tcpPort: 49002
+    });
+  });
+
+  it('creates and lists conversations and messages in chronological order', async () => {
+    const storage = await createStorage();
+    const conversation = await storage.createConversation({
+      kind: 'direct',
+      title: 'Grace',
+      peerId: 'peer-grace'
+    });
+
+    const secondMessage = await storage.createMessage({
+      id: 'msg-2',
+      conversationId: conversation.id,
+      body: 'second',
+      author: 'local',
+      deliveryState: 'sending',
+      createdAt: '2026-07-05T10:00:02.000Z'
+    });
+    const firstMessage = await storage.createMessage({
+      id: 'msg-1',
+      conversationId: conversation.id,
+      body: 'first',
+      author: 'peer',
+      deliveryState: 'delivered',
+      createdAt: '2026-07-05T10:00:01.000Z'
+    });
+
+    const conversations = await storage.listConversations();
+    expect(conversations).toContainEqual({
+      ...conversation,
+      updatedAt: firstMessage.createdAt
+    });
+    await expect(storage.listMessages(conversation.id)).resolves.toEqual([firstMessage, secondMessage]);
+  });
+
+  it('persists created messages across storage instances', async () => {
+    const storage = await createStorage();
+    const filePath = join(tempDirs[0], 'storage.json');
+    const message = await storage.createMessage({
+      conversationId: 'broadcast',
+      body: 'hello LAN',
+      author: 'local',
+      deliveryState: 'unsent'
+    });
+
+    await storage.close();
+    const reopened = new JsonFileStorage(filePath);
+
+    await expect(reopened.listMessages('broadcast')).resolves.toEqual([message]);
+  });
+
+  it('allows valid delivery state transitions', async () => {
+    const storage = await createStorage();
+    const message = await storage.createMessage({
+      conversationId: 'broadcast',
+      body: 'hello',
+      author: 'local',
+      deliveryState: 'sending'
+    });
+
+    const sent = await storage.updateMessageDeliveryState({
+      messageId: message.id,
+      deliveryState: 'sent'
+    });
+    const delivered = await storage.updateMessageDeliveryState({
+      messageId: message.id,
+      deliveryState: 'delivered'
+    });
+
+    expect(sent.deliveryState).toBe('sent');
+    expect(delivered.deliveryState).toBe('delivered');
+  });
+
+  it('rejects invalid delivery state transitions', async () => {
+    const storage = await createStorage();
+    const message = await storage.createMessage({
+      conversationId: 'broadcast',
+      body: 'already delivered',
+      author: 'local',
+      deliveryState: 'delivered'
+    });
+
+    await expect(
+      storage.updateMessageDeliveryState({
+        messageId: message.id,
+        deliveryState: 'sending'
+      })
+    ).rejects.toBeInstanceOf(StorageError);
+  });
+});
