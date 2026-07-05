@@ -288,6 +288,17 @@ describe('createUchatAppService discovery integration', () => {
     await service.cleanup();
   });
 
+  it('stops discovery and TCP sessions once during cleanup', async () => {
+    const { service, discoveryRuntimes, tcpRuntimes } = await createHarness();
+
+    await service.joinRoom({ roomName: 'Room', passphrase: 'secret' });
+    await service.cleanup();
+    await service.cleanup();
+
+    expect(discoveryRuntimes[0].stopCalls).toBe(1);
+    expect(tcpRuntimes[0].stopCalls).toBe(1);
+  });
+
   it('reflects live discovery peers in app state and peer callbacks', async () => {
     const { service, storage, peerEvents, discoveryRuntimes } = await createHarness();
     const peer = createPeer('peer-a', { address: '192.168.1.25' });

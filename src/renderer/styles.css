@@ -189,6 +189,13 @@ textarea:focus {
   box-shadow: 0 0 0 3px rgb(29 143 131 / 14%);
 }
 
+button:focus-visible,
+.conversation-row:focus-visible,
+.copy-command:focus-visible {
+  outline: 3px solid rgb(29 143 131 / 42%);
+  outline-offset: 2px;
+}
+
 .profile-card .secondary-button {
   grid-column: 2;
   justify-self: start;
@@ -305,6 +312,10 @@ textarea:focus {
 .conversation-row.selected {
   border-left-color: #16877b;
   background: #eef6f3;
+}
+
+.conversation-row:focus-visible {
+  background: #e5f2ee;
 }
 
 .conversation-row strong {

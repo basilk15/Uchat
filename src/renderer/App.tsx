@@ -333,11 +333,17 @@ export const App = (): React.JSX.Element => {
           <div className="profile-fields">
             <label>
               Display name
-              <input value={profileDraft} onChange={(event) => setProfileDraft(event.target.value)} />
+              <input
+                id="display-name"
+                autoComplete="name"
+                value={profileDraft}
+                onChange={(event) => setProfileDraft(event.target.value)}
+              />
             </label>
             <label>
               Status
               <select
+                id="presence-status"
                 value={statusDraft}
                 onChange={(event) => setStatusDraft(event.target.value as PresenceStatus)}
               >
@@ -359,12 +365,14 @@ export const App = (): React.JSX.Element => {
           </div>
           <label>
             Room
-            <input value={roomDraft} onChange={(event) => setRoomDraft(event.target.value)} />
+            <input id="room-name" value={roomDraft} onChange={(event) => setRoomDraft(event.target.value)} />
           </label>
           <label>
             Passphrase
             <input
+              id="room-passphrase"
               type="password"
+              autoComplete="current-password"
               value={passphraseDraft}
               onChange={(event) => setPassphraseDraft(event.target.value)}
             />
@@ -383,6 +391,7 @@ export const App = (): React.JSX.Element => {
               activeConversation?.id === 'broadcast' ? 'selected' : ''
             }`}
             type="button"
+            aria-pressed={activeConversation?.id === 'broadcast'}
             onClick={() => setActiveConversationId('broadcast')}
           >
             <span className="room-glyph" aria-hidden="true">
@@ -399,6 +408,7 @@ export const App = (): React.JSX.Element => {
               className={`conversation-row ${activeConversation?.peerId === peer.id ? 'selected' : ''}`}
               type="button"
               key={peer.id}
+              aria-pressed={activeConversation?.peerId === peer.id}
               onClick={() => setActiveConversationId(`direct-${peer.id}`)}
             >
               <span className="avatar small" aria-hidden="true">
@@ -430,10 +440,12 @@ export const App = (): React.JSX.Element => {
                 : `${peers.length} peers receive broadcast messages`}
             </p>
           </div>
-          <span className="send-state">{sendState}</span>
+          <span className="send-state" aria-live="polite">
+            {sendState}
+          </span>
         </header>
 
-        <div className="message-history" aria-live="polite">
+        <div className="message-history" aria-label="Message history" aria-live="polite">
           <div className="day-divider">
             <span>Today</span>
           </div>
@@ -533,6 +545,7 @@ export const App = (): React.JSX.Element => {
                 className="copy-command"
                 type="button"
                 key={command.protocol}
+                aria-label={`Copy ${command.protocol.toUpperCase()} firewall command`}
                 onClick={() => copyText(command.command, `${command.protocol.toUpperCase()} copied`)}
               >
                 <span>{command.protocol.toUpperCase()}</span>
@@ -540,7 +553,12 @@ export const App = (): React.JSX.Element => {
               </button>
             ))}
           </div>
-          <button className="secondary-button wide" type="button" onClick={() => copyText(ufwScript, 'Both copied')}>
+          <button
+            className="secondary-button wide"
+            type="button"
+            aria-label="Copy both firewall commands"
+            onClick={() => copyText(ufwScript, 'Both copied')}
+          >
             {copyState}
           </button>
         </section>
@@ -550,7 +568,7 @@ export const App = (): React.JSX.Element => {
             <span>Network events</span>
             <strong>{events.length}</strong>
           </div>
-          <ol className="event-timeline">
+          <ol className="event-timeline" aria-label="Recent network events">
             {events.map((event) => (
               <li className={event.level} key={event.id}>
                 <span>{formatTime(event.createdAt)}</span>
