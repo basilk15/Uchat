@@ -44,3 +44,11 @@ Use this checklist before tagging a LAN-testable MVP build. It is intentionally 
 - Persistence: restart one app and confirm prior local messages remain visible.
 - Wrong passphrase: a third instance or one restarted app with a different passphrase does not appear in the room and cannot decrypt chat.
 - Firewall UX: if discovery or TCP chat fails, the app displays UDP/TCP ports and copyable `ufw allow` commands, but does not run them.
+
+## Single-Machine Peer Harness
+
+- Run `pnpm peer:sim -- --room "Uchat Lab" --passphrase "demo" --web` on the laptop while `pnpm dev` is running.
+- Confirm the desktop app discovers the simulator and can exchange direct messages with it.
+- Confirm `curl -X POST http://127.0.0.1:8787/api/message -H 'content-type: application/json' -d '{"body":"hello"}'` sends a message into the app.
+- Open the printed LAN URL on a phone browser and confirm the browser page can send a message to the app through the simulator.
+- Confirm the harness only uses normal UDP/TCP sockets and does not modify firewall rules.

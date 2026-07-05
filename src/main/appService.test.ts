@@ -150,6 +150,21 @@ const createHarness = async (
   const messageEvents: ChatMessage[] = [];
   const discoveryRuntimes: FakeDiscoveryRuntime[] = [];
   const tcpRuntimes: FakeTcpSessionRuntime[] = [];
+  const defaultCheckConfiguredPorts: UchatAppServiceOptions['checkConfiguredPorts'] = async ({
+    udpPort,
+    tcpPort
+  }) => ({
+    udp: {
+      protocol: 'udp',
+      port: udpPort,
+      available: true
+    },
+    tcp: {
+      protocol: 'tcp',
+      port: tcpPort,
+      available: true
+    }
+  });
   const createDiscoveryService: DiscoveryServiceFactory = (config, events) => {
     const runtime = new FakeDiscoveryRuntime(config, events);
     discoveryRuntimes.push(runtime);
@@ -168,6 +183,7 @@ const createHarness = async (
     {
       createDiscoveryService,
       createTcpSessionManager,
+      checkConfiguredPorts: defaultCheckConfiguredPorts,
       getLanInterfaces: () => [{ name: 'wlan0', address: '192.168.18.80' }],
       onPeerUpdated: (peer) => peerEvents.push(peer),
       onMessageReceived: (message) => messageEvents.push(message),

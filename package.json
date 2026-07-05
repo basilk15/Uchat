@@ -8,6 +8,7 @@
   "scripts": {
     "dev": "electron-vite dev --noSandbox -- --disable-gpu --disable-gpu-compositing",
     "build": "tsc --noEmit && electron-vite build",
+    "peer:sim": "tsx scripts/uchat-peer-sim.ts",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
@@ -26,6 +27,7 @@
     "electron-vite": "^2.3.0",
     "eslint": "^9.17.0",
     "globals": "^15.14.0",
+    "tsx": "^4.20.6",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.2",
     "vite": "^6.0.5",

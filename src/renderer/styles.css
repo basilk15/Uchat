@@ -44,6 +44,38 @@ button:disabled {
     #eef3f1;
 }
 
+.boot-banner {
+  position: fixed;
+  z-index: 20;
+  top: 0.75rem;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  max-width: min(760px, calc(100vw - 2rem));
+  border: 1px solid #efc0ba;
+  border-radius: 8px;
+  padding: 0.62rem 0.8rem;
+  color: #7b2d26;
+  background: #fff3f1;
+  box-shadow: 0 14px 28px rgb(65 35 31 / 14%);
+  transform: translateX(-50%);
+}
+
+.boot-banner strong {
+  flex: 0 0 auto;
+  font-size: 0.78rem;
+}
+
+.boot-banner span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 0.78rem;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .pane {
   min-width: 0;
   min-height: 100vh;

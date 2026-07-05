@@ -138,6 +138,16 @@ const createLocalMessage = (conversationId: string, body: string): ChatMessage =
   createdAt: new Date().toISOString()
 });
 
+const formatUnknownError = (error: unknown): string =>
+  error instanceof Error ? error.message : 'Unknown renderer boot error.';
+
+const createRendererEvent = (message: string, level: NetworkEvent['level'] = 'warning'): NetworkEvent => ({
+  id: `renderer-${Date.now()}`,
+  level,
+  message,
+  createdAt: new Date().toISOString()
+});
+
 const isReliabilityEvent = (event: NetworkEvent): boolean => {
   const message = event.message.toLowerCase();
 
@@ -163,25 +173,48 @@ export const App = (): React.JSX.Element => {
   const [sendState, setSendState] = useState('Ready');
   const [copyState, setCopyState] = useState('Copy');
   const [roomState, setRoomState] = useState('Local only');
+  const [bootIssue, setBootIssue] = useState<string | null>(null);
 
   useEffect(() => {
     let mounted = true;
+    const api = window.uchat;
 
-    void window.uchat.getAppState().then((appState) => {
-      if (!mounted) {
-        return;
-      }
+    if (!api) {
+      const message = 'Preload API unavailable. Showing local UI shell only.';
+      setBootIssue(message);
+      setEvents([createRendererEvent(message, 'error')]);
+      return () => {
+        mounted = false;
+      };
+    }
 
-      setState(appState);
-      setEvents(appState.networkEvents);
-      setMessages((current) => mergeById([...MOCK_MESSAGES, ...appState.messages, ...current]));
-      setProfileDraft(appState.profile.displayName);
-      setStatusDraft(appState.profile.status);
-      setRoomDraft(appState.room.roomName ?? 'Local room');
-      setRoomState(appState.room.joined ? 'Room joined' : 'Local only');
-    });
+    void api
+      .getAppState()
+      .then((appState) => {
+        if (!mounted) {
+          return;
+        }
 
-    const unsubscribePeer = window.uchat.onPeerUpdated((peer) => {
+        setState(appState);
+        setEvents(appState.networkEvents);
+        setMessages((current) => mergeById([...MOCK_MESSAGES, ...appState.messages, ...current]));
+        setProfileDraft(appState.profile.displayName);
+        setStatusDraft(appState.profile.status);
+        setRoomDraft(appState.room.roomName ?? 'Local room');
+        setRoomState(appState.room.joined ? 'Room joined' : 'Local only');
+        setBootIssue(null);
+      })
+      .catch((error: unknown) => {
+        if (!mounted) {
+          return;
+        }
+
+        const message = `Could not load saved app state: ${formatUnknownError(error)}`;
+        setBootIssue(message);
+        setEvents((current) => [createRendererEvent(message, 'error'), ...current].slice(0, 10));
+      });
+
+    const unsubscribePeer = api.onPeerUpdated((peer) => {
       setState((current) => {
         if (!current) {
           return current;
@@ -194,11 +227,11 @@ export const App = (): React.JSX.Element => {
       });
     });
 
-    const unsubscribeMessage = window.uchat.onMessageReceived((message) => {
+    const unsubscribeMessage = api.onMessageReceived((message) => {
       setMessages((current) => mergeById([...current, message]));
     });
 
-    const unsubscribeEvent = window.uchat.onNetworkEvent((event) => {
+    const unsubscribeEvent = api.onNetworkEvent((event) => {
       setEvents((current) => [event, ...current].slice(0, 10));
     });
 
@@ -248,20 +281,39 @@ export const App = (): React.JSX.Element => {
   const handleProfileSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
 
-    const profile = await window.uchat.setProfile({
-      displayName: profileDraft,
+    const nextProfile = {
+      displayName: profileDraft.trim() || 'Uchat user',
       status: statusDraft
-    });
+    };
 
-    setState((current) => (current ? { ...current, profile } : current));
-    setProfileDraft(profile.displayName);
-    setStatusDraft(profile.status);
+    if (!window.uchat) {
+      setState((current) => (current ? { ...current, profile: nextProfile } : current));
+      setProfileDraft(nextProfile.displayName);
+      setBootIssue('Profile saved in renderer mock state because preload API is unavailable.');
+      return;
+    }
+
+    try {
+      const profile = await window.uchat.setProfile(nextProfile);
+      setState((current) => (current ? { ...current, profile } : current));
+      setProfileDraft(profile.displayName);
+      setStatusDraft(profile.status);
+      setBootIssue(null);
+    } catch (error) {
+      setBootIssue(`Could not save profile: ${formatUnknownError(error)}`);
+    }
   };
 
   const handleJoinRoom = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
 
     setRoomState('Checking ports');
+
+    if (!window.uchat) {
+      setRoomState('Local UI only');
+      setBootIssue('Room join stayed in renderer mock state because preload API is unavailable.');
+      return;
+    }
 
     try {
       const nextState = await window.uchat.joinRoom({
@@ -275,8 +327,10 @@ export const App = (): React.JSX.Element => {
       setEvents(nextState.networkEvents);
       setRoomState('Room joined');
       setActiveConversationId('broadcast');
-    } catch {
+      setBootIssue(null);
+    } catch (error) {
       setRoomState('Join failed');
+      setBootIssue(`Could not join room: ${formatUnknownError(error)}`);
     }
   };
 
@@ -291,6 +345,13 @@ export const App = (): React.JSX.Element => {
     setDraft('');
     setSendState('Saving...');
 
+    if (!window.uchat) {
+      setMessages((current) => [...current, createLocalMessage(activeConversation.id, body)]);
+      setSendState('Saved in local UI fallback');
+      setBootIssue('Message stayed in renderer mock state because preload API is unavailable.');
+      return;
+    }
+
     try {
       const sent = await window.uchat.sendMessage({
         conversationId: activeConversation.id,
@@ -298,9 +359,11 @@ export const App = (): React.JSX.Element => {
       });
       setMessages((current) => mergeById([...current, sent]));
       setSendState(`Message ${sent.deliveryState}`);
-    } catch {
+      setBootIssue(null);
+    } catch (error) {
       setMessages((current) => [...current, createLocalMessage(activeConversation.id, body)]);
       setSendState('Mock direct message kept local');
+      setBootIssue(`Message kept in local UI state: ${formatUnknownError(error)}`);
     }
   };
 
@@ -315,6 +378,13 @@ export const App = (): React.JSX.Element => {
 
   return (
     <main className="uchat-shell">
+      {bootIssue ? (
+        <section className="boot-banner" role="status" aria-live="polite">
+          <strong>Renderer fallback active</strong>
+          <span>{bootIssue}</span>
+        </section>
+      ) : null}
+
       <aside className="pane left-pane" aria-label="Uchat navigation">
         <header className="app-brand">
           <div className="brand-mark" aria-hidden="true">

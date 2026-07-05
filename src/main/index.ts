@@ -27,7 +27,27 @@ const createWindow = (): void => {
       preload: join(__dirname, '../preload/index.mjs'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: false
+    }
+  });
+
+  mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
+    console.error(`[uchat] Preload failed at ${preloadPath}:`, error);
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error(`[uchat] Renderer process exited: ${details.reason} (${details.exitCode}).`);
+  });
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
+    if (isMainFrame) {
+      console.error(`[uchat] Renderer failed to load ${validatedURL}: ${errorCode} ${errorDescription}.`);
+    }
+  });
+
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    if (level >= 2) {
+      console.error(`[uchat:renderer] ${message} (${sourceId}:${line})`);
     }
   });
 
