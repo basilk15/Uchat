@@ -1,11 +1,13 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { UCHAT_IPC } from '@shared/ipc';
-import type { JoinRoomInput, NetworkEvent, SendMessageInput, SetProfileInput } from '@shared/types';
+import type { JoinRoomInput, NetworkEvent, Peer, SendMessageInput, SetProfileInput } from '@shared/types';
 import { createUchatAppService, type UchatAppService } from './appService';
 import { createJsonFileStorage } from './storage/jsonFileStorage';
 
 let mainWindow: BrowserWindow | null = null;
+let appService: UchatAppService | null = null;
+let cleanupStarted = false;
 
 if (process.platform === 'linux') {
   app.disableHardwareAcceleration();
@@ -40,6 +42,10 @@ const emitNetworkEvent = (event: NetworkEvent): void => {
   mainWindow?.webContents.send(UCHAT_IPC.networkEvent, event);
 };
 
+const emitPeerUpdated = (peer: Peer): void => {
+  mainWindow?.webContents.send(UCHAT_IPC.peerUpdated, peer);
+};
+
 const registerIpcHandlers = (service: UchatAppService): void => {
   ipcMain.handle(UCHAT_IPC.getAppState, () => service.getAppState());
 
@@ -55,7 +61,10 @@ const registerIpcHandlers = (service: UchatAppService): void => {
 
 app.whenReady().then(() => {
   const storage = createJsonFileStorage(join(app.getPath('userData'), 'storage.json'));
-  const service = createUchatAppService(storage, emitNetworkEvent);
+  const service = createUchatAppService(storage, emitNetworkEvent, {
+    onPeerUpdated: emitPeerUpdated
+  });
+  appService = service;
   registerIpcHandlers(service);
   createWindow();
 
@@ -63,6 +72,18 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow();
     }
+  });
+});
+
+app.on('before-quit', (event) => {
+  if (!appService || cleanupStarted) {
+    return;
+  }
+
+  event.preventDefault();
+  cleanupStarted = true;
+  void appService.cleanup().finally(() => {
+    app.quit();
   });
 });
 
