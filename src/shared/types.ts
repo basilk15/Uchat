@@ -16,6 +16,9 @@ export interface Peer {
   address: string;
   udpPort: number;
   tcpPort: number;
+  publicKey?: string;
+  roomFingerprint?: string;
+  capabilities?: string[];
   lastSeenAt: string;
 }
 

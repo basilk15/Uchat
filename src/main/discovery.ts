@@ -39,6 +39,9 @@ const toPeer = (packet: DiscoveryPacket, remoteInfo: RemoteInfo, nowMs: number):
   address: remoteInfo.address,
   udpPort: packet.peer.udpPort,
   tcpPort: packet.peer.tcpPort,
+  publicKey: packet.peer.publicKey,
+  roomFingerprint: packet.peer.roomFingerprint,
+  capabilities: packet.peer.capabilities,
   lastSeenAt: new Date(nowMs).toISOString()
 });
 

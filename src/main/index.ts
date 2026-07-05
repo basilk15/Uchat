@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { UCHAT_IPC } from '@shared/ipc';
-import type { JoinRoomInput, NetworkEvent, Peer, SendMessageInput, SetProfileInput } from '@shared/types';
+import type { ChatMessage, JoinRoomInput, NetworkEvent, Peer, SendMessageInput, SetProfileInput } from '@shared/types';
 import { createUchatAppService, type UchatAppService } from './appService';
 import { createJsonFileStorage } from './storage/jsonFileStorage';
 
@@ -46,6 +46,10 @@ const emitPeerUpdated = (peer: Peer): void => {
   mainWindow?.webContents.send(UCHAT_IPC.peerUpdated, peer);
 };
 
+const emitMessageReceived = (message: ChatMessage): void => {
+  mainWindow?.webContents.send(UCHAT_IPC.messageReceived, message);
+};
+
 const registerIpcHandlers = (service: UchatAppService): void => {
   ipcMain.handle(UCHAT_IPC.getAppState, () => service.getAppState());
 
@@ -62,7 +66,8 @@ const registerIpcHandlers = (service: UchatAppService): void => {
 app.whenReady().then(() => {
   const storage = createJsonFileStorage(join(app.getPath('userData'), 'storage.json'));
   const service = createUchatAppService(storage, emitNetworkEvent, {
-    onPeerUpdated: emitPeerUpdated
+    onPeerUpdated: emitPeerUpdated,
+    onMessageReceived: emitMessageReceived
   });
   appService = service;
   registerIpcHandlers(service);

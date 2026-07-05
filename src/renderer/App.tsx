@@ -267,7 +267,7 @@ export const App = (): React.JSX.Element => {
         body
       });
       setMessages((current) => mergeById([...current, sent]));
-      setSendState('Saved locally as unsent');
+      setSendState(`Message ${sent.deliveryState}`);
     } catch {
       setMessages((current) => [...current, createLocalMessage(activeConversation.id, body)]);
       setSendState('Mock direct message kept local');
