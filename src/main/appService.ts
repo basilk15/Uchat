@@ -36,6 +36,16 @@ import {
   type TcpSessionManagerConfig,
   type TcpSessionManagerEvents
 } from './tcp/session';
+import {
+  checkConfiguredPortAvailability,
+  describePortUnavailable,
+  getUsableLanInterfaces,
+  type ConfiguredPortAvailability,
+  type ConfiguredPorts,
+  type LanInterfaceSummary,
+  type PortAvailabilityResult,
+  type PortProtocol
+} from './ports';
 
 export interface UchatAppService {
   getAppState(): Promise<UchatAppState>;
@@ -73,6 +83,8 @@ export type TcpSessionManagerFactory = (
 export interface UchatAppServiceOptions {
   createDiscoveryService?: DiscoveryServiceFactory;
   createTcpSessionManager?: TcpSessionManagerFactory;
+  checkConfiguredPorts?: (ports: ConfiguredPorts) => Promise<ConfiguredPortAvailability>;
+  getLanInterfaces?: () => LanInterfaceSummary[];
   onPeerUpdated?: (peer: Peer) => void;
   onMessageReceived?: (message: ChatMessage) => void;
 }
@@ -88,6 +100,21 @@ const defaultCreateTcpSessionManager: TcpSessionManagerFactory = (config, events
 
 const isDuplicateMessageError = (error: unknown): boolean =>
   error instanceof Error && error.message.includes('Message already exists');
+
+const isAddressInUseError = (error: unknown): boolean =>
+  error instanceof Error && (error as NodeJS.ErrnoException).code === 'EADDRINUSE';
+
+const createStartupFailureResult = (
+  protocol: PortProtocol,
+  port: number,
+  error: unknown
+): PortAvailabilityResult => ({
+  protocol,
+  port,
+  available: false,
+  code: error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined,
+  message: error instanceof Error ? error.message : 'Unknown startup failure.'
+});
 
 const toDiscoveryPeerIdentity = (peer: Peer): DiscoveryPeerIdentity | null => {
   if (!peer.publicKey || !peer.roomFingerprint || !peer.capabilities) {
@@ -126,6 +153,8 @@ export const createUchatAppService = (
 ): UchatAppService => {
   const createDiscoveryService = options.createDiscoveryService ?? defaultCreateDiscoveryService;
   const createTcpSessionManager = options.createTcpSessionManager ?? defaultCreateTcpSessionManager;
+  const checkConfiguredPorts = options.checkConfiguredPorts ?? checkConfiguredPortAvailability;
+  const getLanInterfaces = options.getLanInterfaces ?? getUsableLanInterfaces;
   let discoveryService: DiscoveryRuntime | null = null;
   let tcpSessionManager: TcpSessionRuntime | null = null;
   let activeLocalPeer: DiscoveryPeerIdentity | null = null;
@@ -167,6 +196,27 @@ export const createUchatAppService = (
     const currentTcpSessionManager = tcpSessionManager;
     tcpSessionManager = null;
     await currentTcpSessionManager.stop();
+  };
+
+  const checkRoomNetworking = async (ports: ConfiguredPorts): Promise<void> => {
+    const lanInterfaces = getLanInterfaces();
+    if (lanInterfaces.length === 0) {
+      await recordNetworkEvent(
+        'No usable LAN interface detected. Discovery may not reach other devices until WiFi or Ethernet is connected.',
+        'warning'
+      );
+    }
+
+    const portStatus = await checkConfiguredPorts(ports);
+    const failures = [portStatus.udp, portStatus.tcp].filter((result) => !result.available);
+
+    if (failures.length === 0) {
+      await recordNetworkEvent(`Port check passed for UDP ${ports.udpPort} and TCP ${ports.tcpPort}.`);
+      return;
+    }
+
+    await Promise.all(failures.map((failure) => recordNetworkEvent(describePortUnavailable(failure), 'error')));
+    throw new Error('Cannot join room because one or more configured ports are unavailable.');
   };
 
   const isSameActiveRoomPeer = (peer: Peer): boolean =>
@@ -413,6 +463,18 @@ export const createUchatAppService = (
         tcpPort,
         capabilities: CHAT_CAPABILITIES
       });
+
+      await stopDiscovery();
+      await stopTcpSessions();
+      activeLocalPeer = null;
+      await checkRoomNetworking({ udpPort, tcpPort });
+      await storage.setRoom({
+        roomName,
+        joined: true,
+        udpPort,
+        tcpPort
+      });
+
       const nextTcpSessionManager = createTcpSessionManager(
         {
           peer: localPeer,
@@ -452,15 +514,6 @@ export const createUchatAppService = (
         }
       );
 
-      await stopDiscovery();
-      await stopTcpSessions();
-      await storage.setRoom({
-        roomName,
-        joined: true,
-        udpPort,
-        tcpPort
-      });
-
       activeLocalPeer = localPeer;
       tcpSessionManager = nextTcpSessionManager;
       discoveryService = nextDiscoveryService;
@@ -470,8 +523,19 @@ export const createUchatAppService = (
       } catch (error) {
         tcpSessionManager = null;
         activeLocalPeer = null;
+        await storage.setRoom({
+          roomName,
+          joined: false,
+          udpPort,
+          tcpPort
+        });
         const message = error instanceof Error ? error.message : 'Unknown TCP startup error.';
-        await recordNetworkEvent(`Failed to start TCP listener: ${message}`, 'error');
+        await recordNetworkEvent(
+          isAddressInUseError(error)
+            ? describePortUnavailable(createStartupFailureResult('tcp', tcpPort, error))
+            : `Failed to start TCP listener on ${tcpPort}: ${message}`,
+          'error'
+        );
         throw error;
       }
 
@@ -481,8 +545,19 @@ export const createUchatAppService = (
         discoveryService = null;
         await stopTcpSessions();
         activeLocalPeer = null;
+        await storage.setRoom({
+          roomName,
+          joined: false,
+          udpPort,
+          tcpPort
+        });
         const message = error instanceof Error ? error.message : 'Unknown UDP discovery startup error.';
-        await recordNetworkEvent(`Failed to start UDP discovery: ${message}`, 'error');
+        await recordNetworkEvent(
+          isAddressInUseError(error)
+            ? describePortUnavailable(createStartupFailureResult('udp', udpPort, error))
+            : `Failed to start UDP discovery on ${udpPort}: ${message}`,
+          'error'
+        );
         throw error;
       }
 

@@ -222,6 +222,26 @@ textarea:focus {
   font-size: 0.82rem;
 }
 
+.status-pill {
+  border: 1px solid #cae0d8;
+  border-radius: 999px;
+  padding: 0.24rem 0.5rem;
+  color: #1d7569;
+  background: #edf8f4;
+}
+
+.status-pill.warning {
+  border-color: #f0dca5;
+  color: #886514;
+  background: #fff8df;
+}
+
+.status-pill.error {
+  border-color: #efc0ba;
+  color: #a33b31;
+  background: #fff0ee;
+}
+
 .room-card button,
 .composer button {
   width: fit-content;
@@ -542,6 +562,50 @@ textarea:focus {
   margin: 0;
   font-size: 0.88rem;
   line-height: 1.5;
+}
+
+.port-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.port-summary div {
+  border: 1px solid #dbe5e1;
+  border-radius: 7px;
+  padding: 0.65rem;
+  background: #f7faf9;
+}
+
+.port-summary span {
+  display: block;
+  color: #667976;
+  font-size: 0.72rem;
+  font-weight: 850;
+}
+
+.port-summary strong {
+  display: block;
+  margin-top: 0.22rem;
+  color: #172828;
+  font-size: 1rem;
+}
+
+.port-note {
+  margin: 0;
+  border-left: 3px solid #63ba43;
+  padding-left: 0.7rem;
+  color: #405250;
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.port-note.warning {
+  border-left-color: #d99b19;
+}
+
+.port-note.error {
+  border-left-color: #d85a49;
 }
 
 .port-grid {

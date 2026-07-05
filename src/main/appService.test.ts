@@ -15,7 +15,8 @@ import {
   type DiscoveryRuntime,
   type DiscoveryServiceFactory,
   type TcpSessionManagerFactory,
-  type TcpSessionRuntime
+  type TcpSessionRuntime,
+  type UchatAppServiceOptions
 } from './appService';
 import type { UdpDiscoveryServiceConfig, UdpDiscoveryServiceEvents } from './discovery';
 import { createJsonFileStorage } from './storage/jsonFileStorage';
@@ -139,7 +140,9 @@ const createPeer = (id: string, overrides: Partial<Peer> = {}): Peer => ({
   ...overrides
 });
 
-const createHarness = async () => {
+const createHarness = async (
+  overrides: Pick<UchatAppServiceOptions, 'checkConfiguredPorts' | 'getLanInterfaces'> = {}
+) => {
   const directory = await mkdtemp(join(tmpdir(), 'uchat-app-service-'));
   const storage = createJsonFileStorage(join(directory, 'storage.json'));
   const networkEvents: string[] = [];
@@ -165,8 +168,10 @@ const createHarness = async () => {
     {
       createDiscoveryService,
       createTcpSessionManager,
+      getLanInterfaces: () => [{ name: 'wlan0', address: '192.168.18.80' }],
       onPeerUpdated: (peer) => peerEvents.push(peer),
-      onMessageReceived: (message) => messageEvents.push(message)
+      onMessageReceived: (message) => messageEvents.push(message),
+      ...overrides
     }
   );
 
@@ -219,6 +224,49 @@ describe('createUchatAppService discovery integration', () => {
     });
     expect(JSON.stringify(await storage.getAppState())).not.toContain('correct horse battery staple');
     expect(networkEvents.at(-1)).toBe('Room "Team Room" joined. UDP discovery and TCP listener started.');
+
+    await service.cleanup();
+  });
+
+  it('records port-in-use failures before starting room networking', async () => {
+    const { service, storage, networkEvents, discoveryRuntimes, tcpRuntimes } = await createHarness({
+      checkConfiguredPorts: async ({ udpPort, tcpPort }) => ({
+        udp: {
+          protocol: 'udp',
+          port: udpPort,
+          available: true
+        },
+        tcp: {
+          protocol: 'tcp',
+          port: tcpPort,
+          available: false,
+          code: 'EADDRINUSE',
+          message: 'listen EADDRINUSE'
+        }
+      })
+    });
+
+    await expect(
+      service.joinRoom({
+        roomName: 'Room',
+        passphrase: 'secret',
+        udpPort: 48_888,
+        tcpPort: 48_889
+      })
+    ).rejects.toThrow('Cannot join room because one or more configured ports are unavailable.');
+
+    expect(discoveryRuntimes).toHaveLength(0);
+    expect(tcpRuntimes).toHaveLength(0);
+    expect(networkEvents).toContain(
+      'TCP port 48889 is unavailable. Close the app using 48889/tcp or choose a different TCP port.'
+    );
+    await expect(storage.getAppState()).resolves.toEqual(
+      expect.objectContaining({
+        room: expect.objectContaining({
+          joined: false
+        })
+      })
+    );
 
     await service.cleanup();
   });

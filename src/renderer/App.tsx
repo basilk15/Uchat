@@ -138,6 +138,18 @@ const createLocalMessage = (conversationId: string, body: string): ChatMessage =
   createdAt: new Date().toISOString()
 });
 
+const isReliabilityEvent = (event: NetworkEvent): boolean => {
+  const message = event.message.toLowerCase();
+
+  return (
+    message.includes('port') ||
+    message.includes('firewall') ||
+    message.includes('lan interface') ||
+    message.includes('discovery') ||
+    message.includes('tcp')
+  );
+};
+
 export const App = (): React.JSX.Element => {
   const [state, setState] = useState<UchatAppState | null>(null);
   const [events, setEvents] = useState<NetworkEvent[]>([]);
@@ -150,6 +162,7 @@ export const App = (): React.JSX.Element => {
   const [passphraseDraft, setPassphraseDraft] = useState('part-two-local-passphrase');
   const [sendState, setSendState] = useState('Ready');
   const [copyState, setCopyState] = useState('Copy');
+  const [roomState, setRoomState] = useState('Local only');
 
   useEffect(() => {
     let mounted = true;
@@ -165,6 +178,7 @@ export const App = (): React.JSX.Element => {
       setProfileDraft(appState.profile.displayName);
       setStatusDraft(appState.profile.status);
       setRoomDraft(appState.room.roomName ?? 'Local room');
+      setRoomState(appState.room.joined ? 'Room joined' : 'Local only');
     });
 
     const unsubscribePeer = window.uchat.onPeerUpdated((peer) => {
@@ -217,10 +231,19 @@ export const App = (): React.JSX.Element => {
     udpPort: state?.room.udpPort ?? 47475,
     tcpPort: state?.room.tcpPort ?? 47476
   };
+  const roomJoined = state?.room.joined ?? false;
   const ufwCommands = useMemo(() => createUfwAllowCommands(ports), [ports.tcpPort, ports.udpPort]);
   const ufwScript = useMemo(() => createCopyableUfwAllowScript(ports), [ports.tcpPort, ports.udpPort]);
+  const latestReliabilityEvent = useMemo(() => events.find(isReliabilityEvent), [events]);
+  const portStatusLevel = latestReliabilityEvent?.level ?? 'info';
+  const portStatusLabel =
+    portStatusLevel === 'error' ? 'Needs attention' : portStatusLevel === 'warning' ? 'Check network' : roomJoined ? 'Listening' : 'Not joined';
+  const portStatusMessage =
+    latestReliabilityEvent?.message ??
+    (roomJoined
+      ? `UDP ${ports.udpPort} and TCP ${ports.tcpPort} are configured for this room.`
+      : 'Join a room to check local UDP and TCP port availability.');
   const onlineCount = peers.filter((peer) => peer.status === 'available').length;
-  const roomJoined = state?.room.joined ?? false;
 
   const handleProfileSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -238,16 +261,23 @@ export const App = (): React.JSX.Element => {
   const handleJoinRoom = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
 
-    const nextState = await window.uchat.joinRoom({
-      roomName: roomDraft,
-      passphrase: passphraseDraft,
-      udpPort: ports.udpPort,
-      tcpPort: ports.tcpPort
-    });
+    setRoomState('Checking ports');
 
-    setState(nextState);
-    setEvents(nextState.networkEvents);
-    setActiveConversationId('broadcast');
+    try {
+      const nextState = await window.uchat.joinRoom({
+        roomName: roomDraft,
+        passphrase: passphraseDraft,
+        udpPort: ports.udpPort,
+        tcpPort: ports.tcpPort
+      });
+
+      setState(nextState);
+      setEvents(nextState.networkEvents);
+      setRoomState('Room joined');
+      setActiveConversationId('broadcast');
+    } catch {
+      setRoomState('Join failed');
+    }
   };
 
   const handleSend = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
@@ -325,7 +355,7 @@ export const App = (): React.JSX.Element => {
         <form className="room-card" onSubmit={handleJoinRoom}>
           <div className="section-heading">
             <span>LAN status</span>
-            <strong>{roomJoined ? 'Room joined' : 'Local only'}</strong>
+            <strong>{roomState}</strong>
           </div>
           <label>
             Room
@@ -484,8 +514,19 @@ export const App = (): React.JSX.Element => {
         <section className="detail-section">
           <div className="section-heading">
             <span>Port status</span>
-            <strong>Manual firewall</strong>
+            <strong className={`status-pill ${portStatusLevel}`}>{portStatusLabel}</strong>
           </div>
+          <div className="port-summary">
+            <div>
+              <span>UDP discovery</span>
+              <strong>{ports.udpPort}</strong>
+            </div>
+            <div>
+              <span>TCP chat</span>
+              <strong>{ports.tcpPort}</strong>
+            </div>
+          </div>
+          <p className={`port-note ${portStatusLevel}`}>{portStatusMessage}</p>
           <div className="port-grid">
             {ufwCommands.map((command) => (
               <button
