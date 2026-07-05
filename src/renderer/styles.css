@@ -194,6 +194,14 @@ label {
   text-transform: uppercase;
 }
 
+.field-note {
+  color: #6f807d;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1.35;
+  text-transform: none;
+}
+
 input,
 select,
 textarea {
@@ -377,6 +385,28 @@ button:focus-visible,
 
 .broadcast-row {
   margin-bottom: 0.35rem;
+}
+
+.empty-list {
+  display: grid;
+  gap: 0.24rem;
+  margin: 0.25rem 1rem 0;
+  border: 1px dashed #cbd9d4;
+  border-radius: 8px;
+  padding: 0.85rem;
+  color: #40514f;
+  background: #f8fbfa;
+}
+
+.empty-list strong {
+  color: #203331;
+  font-size: 0.88rem;
+}
+
+.empty-list span {
+  color: #697b78;
+  font-size: 0.78rem;
+  line-height: 1.4;
 }
 
 .room-glyph {

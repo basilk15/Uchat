@@ -92,6 +92,11 @@ export interface UchatAppServiceOptions {
 const DIRECT_CONVERSATION_PREFIX = 'direct-';
 const CHAT_CAPABILITIES = ['discovery', 'tcp-session', 'chat'];
 
+interface PendingBroadcastAcks {
+  expectedPeerIds: Set<string>;
+  acknowledgedPeerIds: Set<string>;
+}
+
 const defaultCreateDiscoveryService: DiscoveryServiceFactory = (config, events) =>
   new UdpDiscoveryService(config, events);
 
@@ -158,6 +163,7 @@ export const createUchatAppService = (
   let discoveryService: DiscoveryRuntime | null = null;
   let tcpSessionManager: TcpSessionRuntime | null = null;
   let activeLocalPeer: DiscoveryPeerIdentity | null = null;
+  const pendingBroadcastAcks = new Map<string, PendingBroadcastAcks>();
 
   const recordNetworkEvent = async (
     message: string,
@@ -166,6 +172,35 @@ export const createUchatAppService = (
     const event = await storage.addNetworkEvent({ level, message });
     onNetworkEvent(event);
     return event;
+  };
+
+  const reconcilePersistedRuntimeState = async (): Promise<void> => {
+    const state = await storage.getAppState();
+
+    if (state.peers.length > 0) {
+      await storage.clearPeers();
+    }
+
+    if (!state.room.joined) {
+      return;
+    }
+
+    await storage.setRoom({
+      ...state.room,
+      joined: false
+    });
+    await recordNetworkEvent(
+      'LAN networking is disconnected after restart. Re-enter the room passphrase to resume UDP discovery and TCP chat.',
+      'warning'
+    );
+  };
+
+  const startupReady = reconcilePersistedRuntimeState();
+  void startupReady.catch(() => undefined);
+
+  const afterStartup = async <T>(operation: () => Promise<T>): Promise<T> => {
+    await startupReady;
+    return operation();
   };
 
   const getLivePeers = async (): Promise<Peer[]> => discoveryService?.listPeers() ?? storage.listPeers();
@@ -303,7 +338,22 @@ export const createUchatAppService = (
     }
   };
 
-  const markAcknowledged = async (messageId: string): Promise<void> => {
+  const findStoredMessageConversation = async (
+    messageId: string
+  ): Promise<{ message: ChatMessage; conversation: Conversation } | null> => {
+    const message = (await storage.listMessages()).find((current) => current.id === messageId);
+    if (!message) {
+      return null;
+    }
+
+    const conversation = (await storage.listConversations()).find(
+      (current) => current.id === message.conversationId
+    );
+
+    return conversation ? { message, conversation } : null;
+  };
+
+  const markAcknowledged = async (messageId: string): Promise<ChatMessage | null> => {
     let updated = await updateDeliveryState(messageId, 'delivered', false);
 
     if (!updated) {
@@ -313,10 +363,11 @@ export const createUchatAppService = (
 
     if (updated) {
       options.onMessageReceived?.(updated);
-      return;
+      return updated;
     }
 
     await recordNetworkEvent(`Failed to apply chat acknowledgement for message ${messageId}.`, 'warning');
+    return null;
   };
 
   const getOrConnectSession = async (peer: Peer): Promise<TcpSession> => {
@@ -410,6 +461,30 @@ export const createUchatAppService = (
       return;
     }
 
+    const pendingBroadcast = pendingBroadcastAcks.get(validation.frame.messageId);
+    if (pendingBroadcast) {
+      if (pendingBroadcast.expectedPeerIds.has(message.session.remotePeer.id)) {
+        pendingBroadcast.acknowledgedPeerIds.add(message.session.remotePeer.id);
+      }
+
+      if (pendingBroadcast.acknowledgedPeerIds.size < pendingBroadcast.expectedPeerIds.size) {
+        return;
+      }
+
+      pendingBroadcastAcks.delete(validation.frame.messageId);
+      await markAcknowledged(validation.frame.messageId);
+      return;
+    }
+
+    const stored = await findStoredMessageConversation(validation.frame.messageId);
+    if (stored?.conversation.kind === 'broadcast') {
+      await recordNetworkEvent(
+        `Ignored broadcast acknowledgement for ${validation.frame.messageId} because recipient tracking is not active.`,
+        'warning'
+      );
+      return;
+    }
+
     await markAcknowledged(validation.frame.messageId);
   };
 
@@ -433,212 +508,246 @@ export const createUchatAppService = (
   };
 
   return {
-    getAppState: getAppStateWithLivePeers,
+    getAppState: () => afterStartup(getAppStateWithLivePeers),
 
     async setProfile(input) {
-      const profile = await storage.setProfile({
-        displayName: input.displayName.trim() || 'Uchat user',
-        status: input.status
+      return afterStartup(async () => {
+        const profile = await storage.setProfile({
+          displayName: input.displayName.trim() || 'Uchat user',
+          status: input.status
+        });
+        await recordNetworkEvent(`Profile set to ${profile.displayName}.`);
+        return profile;
       });
-      await recordNetworkEvent(`Profile set to ${profile.displayName}.`);
-      return profile;
     },
 
     async joinRoom(input) {
-      const roomName = input.roomName.trim() || 'Local room';
-      const udpPort = input.udpPort ?? DEFAULT_DISCOVERY_PORT;
-      const tcpPort = input.tcpPort ?? DEFAULT_TCP_PORT;
-      const [state, roomKey, identity] = await Promise.all([
-        storage.getAppState(),
-        deriveRoomKey(roomName, input.passphrase),
-        Promise.resolve(generateX25519Identity())
-      ]);
-      const localPeer = createLocalDiscoveryPeer({
-        id: identity.publicKey,
-        displayName: state.profile.displayName,
-        status: state.profile.status,
-        roomFingerprint: roomKey.fingerprint,
-        publicKey: identity.publicKey,
-        udpPort,
-        tcpPort,
-        capabilities: CHAT_CAPABILITIES
-      });
-
-      await stopDiscovery();
-      await stopTcpSessions();
-      activeLocalPeer = null;
-      await checkRoomNetworking({ udpPort, tcpPort });
-      await storage.setRoom({
-        roomName,
-        joined: true,
-        udpPort,
-        tcpPort
-      });
-
-      const nextTcpSessionManager = createTcpSessionManager(
-        {
-          peer: localPeer,
-          privateKey: identity.privateKey,
-          roomKey: roomKey.key,
-          tcpPort
-        },
-        {
-          onEncryptedMessage: (message) => {
-            void handleEncryptedMessage(message);
-          },
-          onSessionError: (error) => {
-            void recordNetworkEvent(`TCP session error: ${error.message}`, 'warning');
-          }
-        }
-      );
-      const nextDiscoveryService = createDiscoveryService(
-        {
-          localPeer,
-          udpPort
-        },
-        {
-          onPeerUpdated: (peer) => {
-            void storage
-              .upsertPeer(peer)
-              .then((savedPeer) => {
-                options.onPeerUpdated?.(savedPeer);
-              })
-              .catch((error: unknown) => {
-                const message = error instanceof Error ? error.message : 'Unknown peer persistence error.';
-                void recordNetworkEvent(`Failed to persist discovered peer: ${message}`, 'error');
-              });
-          },
-          onNetworkEvent: (message, level) => {
-            void recordNetworkEvent(message, level);
-          }
-        }
-      );
-
-      activeLocalPeer = localPeer;
-      tcpSessionManager = nextTcpSessionManager;
-      discoveryService = nextDiscoveryService;
-
-      try {
-        await tcpSessionManager.start();
-      } catch (error) {
-        tcpSessionManager = null;
-        activeLocalPeer = null;
-        await storage.setRoom({
-          roomName,
-          joined: false,
+      return afterStartup(async () => {
+        const roomName = input.roomName.trim() || 'Local room';
+        const udpPort = input.udpPort ?? DEFAULT_DISCOVERY_PORT;
+        const tcpPort = input.tcpPort ?? DEFAULT_TCP_PORT;
+        const [state, roomKey, identity] = await Promise.all([
+          storage.getAppState(),
+          deriveRoomKey(roomName, input.passphrase),
+          Promise.resolve(generateX25519Identity())
+        ]);
+        const localPeer = createLocalDiscoveryPeer({
+          id: identity.publicKey,
+          displayName: state.profile.displayName,
+          status: state.profile.status,
+          roomFingerprint: roomKey.fingerprint,
+          publicKey: identity.publicKey,
           udpPort,
-          tcpPort
+          tcpPort,
+          capabilities: CHAT_CAPABILITIES
         });
-        const message = error instanceof Error ? error.message : 'Unknown TCP startup error.';
-        await recordNetworkEvent(
-          isAddressInUseError(error)
-            ? describePortUnavailable(createStartupFailureResult('tcp', tcpPort, error))
-            : `Failed to start TCP listener on ${tcpPort}: ${message}`,
-          'error'
-        );
-        throw error;
-      }
 
-      try {
-        await discoveryService.start();
-      } catch (error) {
-        discoveryService = null;
+        await stopDiscovery();
         await stopTcpSessions();
         activeLocalPeer = null;
+        await checkRoomNetworking({ udpPort, tcpPort });
         await storage.setRoom({
           roomName,
-          joined: false,
+          joined: true,
           udpPort,
           tcpPort
         });
-        const message = error instanceof Error ? error.message : 'Unknown UDP discovery startup error.';
-        await recordNetworkEvent(
-          isAddressInUseError(error)
-            ? describePortUnavailable(createStartupFailureResult('udp', udpPort, error))
-            : `Failed to start UDP discovery on ${udpPort}: ${message}`,
-          'error'
-        );
-        throw error;
-      }
 
-      await recordNetworkEvent(`Room "${roomName}" joined. UDP discovery and TCP listener started.`);
-      return getAppStateWithLivePeers();
+        const nextTcpSessionManager = createTcpSessionManager(
+          {
+            peer: localPeer,
+            privateKey: identity.privateKey,
+            roomKey: roomKey.key,
+            tcpPort
+          },
+          {
+            onEncryptedMessage: (message) => {
+              void handleEncryptedMessage(message);
+            },
+            onSessionError: (error) => {
+              void recordNetworkEvent(`TCP session error: ${error.message}`, 'warning');
+            }
+          }
+        );
+        const nextDiscoveryService = createDiscoveryService(
+          {
+            localPeer,
+            udpPort
+          },
+          {
+            onPeerUpdated: (peer) => {
+              void storage
+                .upsertPeer(peer)
+                .then((savedPeer) => {
+                  options.onPeerUpdated?.(savedPeer);
+                })
+                .catch((error: unknown) => {
+                  const message = error instanceof Error ? error.message : 'Unknown peer persistence error.';
+                  void recordNetworkEvent(`Failed to persist discovered peer: ${message}`, 'error');
+                });
+            },
+            onNetworkEvent: (message, level) => {
+              void recordNetworkEvent(message, level);
+            }
+          }
+        );
+
+        activeLocalPeer = localPeer;
+        tcpSessionManager = nextTcpSessionManager;
+        discoveryService = nextDiscoveryService;
+
+        try {
+          await tcpSessionManager.start();
+        } catch (error) {
+          tcpSessionManager = null;
+          activeLocalPeer = null;
+          await storage.setRoom({
+            roomName,
+            joined: false,
+            udpPort,
+            tcpPort
+          });
+          const message = error instanceof Error ? error.message : 'Unknown TCP startup error.';
+          await recordNetworkEvent(
+            isAddressInUseError(error)
+              ? describePortUnavailable(createStartupFailureResult('tcp', tcpPort, error))
+              : `Failed to start TCP listener on ${tcpPort}: ${message}`,
+            'error'
+          );
+          throw error;
+        }
+
+        try {
+          await discoveryService.start();
+        } catch (error) {
+          discoveryService = null;
+          await stopTcpSessions();
+          activeLocalPeer = null;
+          await storage.setRoom({
+            roomName,
+            joined: false,
+            udpPort,
+            tcpPort
+          });
+          const message = error instanceof Error ? error.message : 'Unknown UDP discovery startup error.';
+          await recordNetworkEvent(
+            isAddressInUseError(error)
+              ? describePortUnavailable(createStartupFailureResult('udp', udpPort, error))
+              : `Failed to start UDP discovery on ${udpPort}: ${message}`,
+            'error'
+          );
+          throw error;
+        }
+
+        await recordNetworkEvent(`Room "${roomName}" joined. UDP discovery and TCP listener started.`);
+        return getAppStateWithLivePeers();
+      });
     },
 
-    listPeers: getLivePeers,
+    listPeers: () => afterStartup(getLivePeers),
 
-    listConversations: () => storage.listConversations(),
+    listConversations: () => afterStartup(() => storage.listConversations()),
 
     async sendMessage(input) {
-      const body = input.body.trim();
-      if (!body) {
-        throw new Error('Message body cannot be empty.');
-      }
+      return afterStartup(async () => {
+        const body = input.body.trim();
+        if (!body) {
+          throw new Error('Message body cannot be empty.');
+        }
 
-      const conversation = await resolveSendConversation(input.conversationId);
-      const message = await storage.createMessage({
-        conversationId: conversation.id,
-        body,
-        author: 'local',
-        deliveryState: 'sending'
-      });
+        const conversation = await resolveSendConversation(input.conversationId);
+        const message = await storage.createMessage({
+          conversationId: conversation.id,
+          body,
+          author: 'local',
+          deliveryState: 'sending'
+        });
 
-      if (conversation.kind === 'broadcast') {
-        const peers = await listOnlineChatPeers();
-        if (peers.length === 0) {
+        if (conversation.kind === 'broadcast') {
+          const peers = await listOnlineChatPeers();
+          if (peers.length === 0) {
+            const unsent = await updateDeliveryState(message.id, 'unsent');
+            await recordNetworkEvent(
+              'Broadcast message saved as unsent because no same-room peers are online.',
+              'warning'
+            );
+            return unsent ?? message;
+          }
+
+          pendingBroadcastAcks.set(message.id, {
+            expectedPeerIds: new Set(peers.map((peer) => peer.id)),
+            acknowledgedPeerIds: new Set()
+          });
+
+          const deliveries = await Promise.allSettled(
+            peers.map((peer) => sendChatMessageToPeer(peer, message, 'broadcast'))
+          );
+          const deliveredCount = deliveries.filter((delivery) => delivery.status === 'fulfilled').length;
+
+          if (deliveredCount === 0) {
+            pendingBroadcastAcks.delete(message.id);
+            const failed = await updateDeliveryState(message.id, 'failed');
+            await recordNetworkEvent('Broadcast message failed for all online peers.', 'error');
+            return failed ?? message;
+          }
+
+          if (deliveredCount < peers.length) {
+            pendingBroadcastAcks.delete(message.id);
+            const failed = await updateDeliveryState(message.id, 'failed');
+            await recordNetworkEvent(
+              `Broadcast message only reached ${deliveredCount}/${peers.length} online peers; full delivery is not guaranteed.`,
+              'error'
+            );
+            return failed ?? message;
+          }
+
+          const sent = await updateDeliveryState(message.id, 'sent');
+          const pending = pendingBroadcastAcks.get(message.id);
+          if (pending && pending.acknowledgedPeerIds.size === pending.expectedPeerIds.size) {
+            pendingBroadcastAcks.delete(message.id);
+            return (await markAcknowledged(message.id)) ?? sent ?? message;
+          }
+
+          await recordNetworkEvent(`Broadcast message sent to ${deliveredCount}/${peers.length} online peers.`);
+          return sent ?? message;
+        }
+
+        if (!conversation.peerId) {
+          const failed = await updateDeliveryState(message.id, 'failed');
+          await recordNetworkEvent('Direct message conversation is missing a peer id.', 'error');
+          return failed ?? message;
+        }
+
+        const peer = await findOnlinePeer(conversation.peerId);
+        if (!peer) {
           const unsent = await updateDeliveryState(message.id, 'unsent');
-          await recordNetworkEvent('Broadcast message saved as unsent because no same-room peers are online.', 'warning');
+          await recordNetworkEvent('Direct message saved as unsent because the peer is offline.', 'warning');
           return unsent ?? message;
         }
 
-        const deliveries = await Promise.allSettled(
-          peers.map((peer) => sendChatMessageToPeer(peer, message, 'broadcast'))
-        );
-        const deliveredCount = deliveries.filter((delivery) => delivery.status === 'fulfilled').length;
-
-        if (deliveredCount === 0) {
+        try {
+          await sendChatMessageToPeer(peer, message, 'direct');
+        } catch (error) {
           const failed = await updateDeliveryState(message.id, 'failed');
-          await recordNetworkEvent('Broadcast message failed for all online peers.', 'error');
+          const errorMessage = error instanceof Error ? error.message : 'Unknown TCP send error.';
+          await recordNetworkEvent(`Failed to send direct message to ${peer.displayName}: ${errorMessage}`, 'error');
           return failed ?? message;
         }
 
         const sent = await updateDeliveryState(message.id, 'sent');
-        await recordNetworkEvent(`Broadcast message sent to ${deliveredCount}/${peers.length} online peers.`);
+        await recordNetworkEvent(`Direct message sent to ${peer.displayName}.`);
         return sent ?? message;
-      }
-
-      if (!conversation.peerId) {
-        const failed = await updateDeliveryState(message.id, 'failed');
-        await recordNetworkEvent('Direct message conversation is missing a peer id.', 'error');
-        return failed ?? message;
-      }
-
-      const peer = await findOnlinePeer(conversation.peerId);
-      if (!peer) {
-        const unsent = await updateDeliveryState(message.id, 'unsent');
-        await recordNetworkEvent('Direct message saved as unsent because the peer is offline.', 'warning');
-        return unsent ?? message;
-      }
-
-      try {
-        await sendChatMessageToPeer(peer, message, 'direct');
-      } catch (error) {
-        const failed = await updateDeliveryState(message.id, 'failed');
-        const errorMessage = error instanceof Error ? error.message : 'Unknown TCP send error.';
-        await recordNetworkEvent(`Failed to send direct message to ${peer.displayName}: ${errorMessage}`, 'error');
-        return failed ?? message;
-      }
-
-      const sent = await updateDeliveryState(message.id, 'sent');
-      await recordNetworkEvent(`Direct message sent to ${peer.displayName}.`);
-      return sent ?? message;
+      });
     },
 
     async cleanup() {
-      await stopDiscovery();
-      await stopTcpSessions();
-      activeLocalPeer = null;
-      await storage.close();
+      await afterStartup(async () => {
+        await stopDiscovery();
+        await stopTcpSessions();
+        activeLocalPeer = null;
+        pendingBroadcastAcks.clear();
+        await storage.close();
+      });
     }
   };
 };

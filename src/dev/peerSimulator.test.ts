@@ -34,4 +34,13 @@ describe('peer simulator helpers', () => {
       targetPeerId: 'peer-123'
     });
   });
+
+  it('ignores a leading pnpm separator when parsing CLI arguments', () => {
+    const options = parsePeerSimulatorArgs(['--', '--room', 'Lab', '--passphrase', 'secret']);
+
+    expect(options).toMatchObject({
+      roomName: 'Lab',
+      passphrase: 'secret'
+    });
+  });
 });

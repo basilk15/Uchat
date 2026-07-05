@@ -115,6 +115,12 @@ export class JsonFileStorage implements UchatStorage {
     });
   }
 
+  async clearPeers(): Promise<void> {
+    return this.#transact((snapshot) => {
+      snapshot.peers = [];
+    });
+  }
+
   async listConversations(): Promise<Conversation[]> {
     const snapshot = await this.getAppState();
     return snapshot.conversations;

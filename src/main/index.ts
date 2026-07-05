@@ -4,6 +4,7 @@ import { UCHAT_IPC } from '@shared/ipc';
 import type { ChatMessage, JoinRoomInput, NetworkEvent, Peer, SendMessageInput, SetProfileInput } from '@shared/types';
 import { createUchatAppService, type UchatAppService } from './appService';
 import { createJsonFileStorage } from './storage/jsonFileStorage';
+import { resolveRendererUrlToLoad } from './rendererUrl';
 
 let mainWindow: BrowserWindow | null = null;
 let appService: UchatAppService | null = null;
@@ -51,8 +52,13 @@ const createWindow = (): void => {
     }
   });
 
-  if (process.env.ELECTRON_RENDERER_URL) {
-    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL);
+  const rendererUrl = resolveRendererUrlToLoad({
+    isPackaged: app.isPackaged,
+    rendererUrl: process.env.ELECTRON_RENDERER_URL
+  });
+
+  if (rendererUrl) {
+    void mainWindow.loadURL(rendererUrl);
   } else {
     void mainWindow.loadFile(join(__dirname, '../renderer/index.html'));
   }

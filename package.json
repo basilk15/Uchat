@@ -6,7 +6,7 @@
   "type": "module",
   "main": "out/main/index.js",
   "scripts": {
-    "dev": "electron-vite dev --noSandbox -- --disable-gpu --disable-gpu-compositing",
+    "dev": "NO_SANDBOX=1 electron-vite dev -- --disable-gpu --disable-gpu-compositing",
     "build": "tsc --noEmit && electron-vite build",
     "peer:sim": "tsx scripts/uchat-peer-sim.ts",
     "test": "vitest run",

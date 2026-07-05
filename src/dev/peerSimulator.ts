@@ -1027,9 +1027,11 @@ export const createPeerSimulator = (options: PeerSimulatorOptions): PeerSimulato
 };
 
 export const parsePeerSimulatorArgs = (argv: string[]): PeerSimulatorOptions => {
-  const helpRequested = argv.includes('--help') || argv.includes('-h') || argv.includes('help');
+  const normalizedArgv = argv[0] === '--' ? argv.slice(1) : argv;
+  const helpRequested =
+    normalizedArgv.includes('--help') || normalizedArgv.includes('-h') || normalizedArgv.includes('help');
   const result = parseArgs({
-    args: argv,
+    args: normalizedArgv,
     options: {
       room: { type: 'string' },
       passphrase: { type: 'string' },
@@ -1085,7 +1087,7 @@ export const printPeerSimulatorHelp = (): void => {
     'Uchat peer simulator',
     '',
     'Usage:',
-    '  pnpm peer:sim -- --room "Lab" --passphrase "secret" [options]',
+    '  pnpm peer:sim --room "Lab" --passphrase "secret" [options]',
     '',
     'Options:',
     '  --room <name>                 Room name to join.',
@@ -1105,10 +1107,11 @@ export const printPeerSimulatorHelp = (): void => {
     '',
     'Browser bridge:',
     '  Open the printed LAN URL on your phone. The page lets you send direct or broadcast messages to the app.',
+    '  The separator form also works: pnpm peer:sim -- --room "Lab" --passphrase "secret" --web',
     '',
     'Examples:',
-    '  pnpm peer:sim -- --room "Uchat Lab" --passphrase "demo" --web',
-    '  pnpm peer:sim -- --room "Uchat Lab" --passphrase "demo" --send "hello from terminal"',
+    '  pnpm peer:sim --room "Uchat Lab" --passphrase "demo" --web',
+    '  pnpm peer:sim --room "Uchat Lab" --passphrase "demo" --send "hello from terminal"',
     '  curl -X POST http://127.0.0.1:8787/api/message -H "content-type: application/json" -d \'{"body":"hello"}\''
   ];
 

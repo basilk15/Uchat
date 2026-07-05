@@ -23,10 +23,16 @@ This harness is only for testing the LAN protocol from one laptop. It does not c
 3. Start the simulator in another terminal:
 
    ```bash
-   pnpm peer:sim -- --room "Uchat Lab" --passphrase "demo" --send "hello from the laptop"
+   pnpm peer:sim --room "Uchat Lab" --passphrase "demo" --send "hello from the laptop"
    ```
 
 4. If you want the simulator to keep a browser page available for your phone, add `--web`:
+
+   ```bash
+   pnpm peer:sim --room "Uchat Lab" --passphrase "demo" --web
+   ```
+
+   The simulator also accepts the `--` separator form if you prefer it:
 
    ```bash
    pnpm peer:sim -- --room "Uchat Lab" --passphrase "demo" --web
@@ -45,7 +51,7 @@ This harness is only for testing the LAN protocol from one laptop. It does not c
 1. Start the simulator with the browser bridge:
 
    ```bash
-   pnpm peer:sim -- --room "Uchat Lab" --passphrase "demo" --web
+   pnpm peer:sim --room "Uchat Lab" --passphrase "demo" --web
    ```
 
 2. Read the printed LAN URLs. Open the `http://<laptop-lan-ip>:8787` URL on your phone.

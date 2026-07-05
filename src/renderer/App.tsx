@@ -12,62 +12,13 @@ import type {
 
 const now = new Date('2026-07-05T10:30:00.000Z').toISOString();
 
-const MOCK_PEERS: Peer[] = [
-  {
-    id: 'peer-akhil',
-    displayName: 'Akhil',
-    status: 'available',
-    address: '192.168.18.21',
-    udpPort: 47475,
-    tcpPort: 47476,
-    lastSeenAt: now
-  },
-  {
-    id: 'peer-ayesha',
-    displayName: 'Ayesha',
-    status: 'away',
-    address: '192.168.18.34',
-    udpPort: 47475,
-    tcpPort: 47476,
-    lastSeenAt: new Date('2026-07-05T10:25:00.000Z').toISOString()
-  },
-  {
-    id: 'peer-omar',
-    displayName: 'Omar',
-    status: 'busy',
-    address: '192.168.18.45',
-    udpPort: 47475,
-    tcpPort: 47477,
-    lastSeenAt: new Date('2026-07-05T10:18:00.000Z').toISOString()
-  }
-];
-
-const MOCK_MESSAGES: ChatMessage[] = [
-  {
-    id: 'mock-message-1',
-    conversationId: 'direct-peer-akhil',
-    body: 'Hey Basil, can you see me on the LAN list?',
-    author: 'peer',
-    deliveryState: 'delivered',
-    createdAt: new Date('2026-07-05T10:31:00.000Z').toISOString()
-  },
-  {
-    id: 'mock-message-2',
-    conversationId: 'direct-peer-akhil',
-    body: 'Yes, your heartbeat is showing on 192.168.18.21.',
-    author: 'local',
-    deliveryState: 'unsent',
-    createdAt: new Date('2026-07-05T10:32:00.000Z').toISOString()
-  },
-  {
-    id: 'mock-message-3',
-    conversationId: 'broadcast',
-    body: 'Broadcast room is ready for everyone on this WiFi.',
-    author: 'local',
-    deliveryState: 'unsent',
-    createdAt: new Date('2026-07-05T10:33:00.000Z').toISOString()
-  }
-];
+const deliveryStateRank: Record<ChatMessage['deliveryState'], number> = {
+  unsent: 0,
+  sending: 1,
+  sent: 2,
+  failed: 3,
+  delivered: 4
+};
 
 const formatTime = (value: string): string =>
   new Intl.DateTimeFormat(undefined, {
@@ -101,6 +52,32 @@ const mergeById = <T extends { id: string }>(items: T[]): T[] => {
   const byId = new Map<string, T>();
   items.forEach((item) => byId.set(item.id, item));
   return Array.from(byId.values());
+};
+
+const mergeMessage = (existing: ChatMessage, incoming: ChatMessage): ChatMessage => {
+  const existingRank = deliveryStateRank[existing.deliveryState];
+  const incomingRank = deliveryStateRank[incoming.deliveryState];
+
+  if (existingRank > incomingRank) {
+    return existing;
+  }
+
+  if (existingRank === incomingRank && existing.createdAt > incoming.createdAt) {
+    return existing;
+  }
+
+  return incoming;
+};
+
+const mergeMessages = (items: ChatMessage[]): ChatMessage[] => {
+  const byId = new Map<string, ChatMessage>();
+
+  items.forEach((item) => {
+    const existing = byId.get(item.id);
+    byId.set(item.id, existing ? mergeMessage(existing, item) : item);
+  });
+
+  return Array.from(byId.values()).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 };
 
 const buildConversations = (base: Conversation[], peers: Peer[]): Conversation[] => {
@@ -163,17 +140,18 @@ const isReliabilityEvent = (event: NetworkEvent): boolean => {
 export const App = (): React.JSX.Element => {
   const [state, setState] = useState<UchatAppState | null>(null);
   const [events, setEvents] = useState<NetworkEvent[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>(MOCK_MESSAGES);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [activeConversationId, setActiveConversationId] = useState('broadcast');
   const [draft, setDraft] = useState('');
   const [profileDraft, setProfileDraft] = useState('Basil');
   const [statusDraft, setStatusDraft] = useState<PresenceStatus>('available');
   const [roomDraft, setRoomDraft] = useState('Local room');
-  const [passphraseDraft, setPassphraseDraft] = useState('part-two-local-passphrase');
+  const [passphraseDraft, setPassphraseDraft] = useState('');
   const [sendState, setSendState] = useState('Ready');
   const [copyState, setCopyState] = useState('Copy');
   const [roomState, setRoomState] = useState('Local only');
   const [bootIssue, setBootIssue] = useState<string | null>(null);
+  const [passphraseSubmitted, setPassphraseSubmitted] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -197,10 +175,12 @@ export const App = (): React.JSX.Element => {
 
         setState(appState);
         setEvents(appState.networkEvents);
-        setMessages((current) => mergeById([...MOCK_MESSAGES, ...appState.messages, ...current]));
+        setMessages((current) => mergeMessages([...current, ...appState.messages]));
         setProfileDraft(appState.profile.displayName);
         setStatusDraft(appState.profile.status);
         setRoomDraft(appState.room.roomName ?? 'Local room');
+        setPassphraseDraft('');
+        setPassphraseSubmitted(false);
         setRoomState(appState.room.joined ? 'Room joined' : 'Local only');
         setBootIssue(null);
       })
@@ -228,7 +208,7 @@ export const App = (): React.JSX.Element => {
     });
 
     const unsubscribeMessage = api.onMessageReceived((message) => {
-      setMessages((current) => mergeById([...current, message]));
+      setMessages((current) => mergeMessages([...current, message]));
     });
 
     const unsubscribeEvent = api.onNetworkEvent((event) => {
@@ -243,7 +223,7 @@ export const App = (): React.JSX.Element => {
     };
   }, []);
 
-  const peers = useMemo(() => (state?.peers.length ? state.peers : MOCK_PEERS), [state?.peers]);
+  const peers = useMemo(() => state?.peers ?? [], [state?.peers]);
   const conversations = useMemo(
     () => buildConversations(state?.conversations ?? [], peers),
     [peers, state?.conversations]
@@ -289,7 +269,7 @@ export const App = (): React.JSX.Element => {
     if (!window.uchat) {
       setState((current) => (current ? { ...current, profile: nextProfile } : current));
       setProfileDraft(nextProfile.displayName);
-      setBootIssue('Profile saved in renderer mock state because preload API is unavailable.');
+      setBootIssue('Profile saved only in this renderer session because preload API is unavailable.');
       return;
     }
 
@@ -309,9 +289,16 @@ export const App = (): React.JSX.Element => {
 
     setRoomState('Checking ports');
 
+    if (!passphraseDraft.trim()) {
+      setRoomState('Passphrase required');
+      setPassphraseSubmitted(false);
+      setBootIssue('Enter the room passphrase again. Uchat never stores passphrases after restart.');
+      return;
+    }
+
     if (!window.uchat) {
       setRoomState('Local UI only');
-      setBootIssue('Room join stayed in renderer mock state because preload API is unavailable.');
+      setBootIssue('Room join stayed local to this renderer session because preload API is unavailable.');
       return;
     }
 
@@ -326,6 +313,7 @@ export const App = (): React.JSX.Element => {
       setState(nextState);
       setEvents(nextState.networkEvents);
       setRoomState('Room joined');
+      setPassphraseSubmitted(true);
       setActiveConversationId('broadcast');
       setBootIssue(null);
     } catch (error) {
@@ -348,7 +336,7 @@ export const App = (): React.JSX.Element => {
     if (!window.uchat) {
       setMessages((current) => [...current, createLocalMessage(activeConversation.id, body)]);
       setSendState('Saved in local UI fallback');
-      setBootIssue('Message stayed in renderer mock state because preload API is unavailable.');
+      setBootIssue('Message stayed local to this renderer session because preload API is unavailable.');
       return;
     }
 
@@ -357,7 +345,7 @@ export const App = (): React.JSX.Element => {
         conversationId: activeConversation.id,
         body
       });
-      setMessages((current) => mergeById([...current, sent]));
+      setMessages((current) => mergeMessages([...current, sent]));
       setSendState(`Message ${sent.deliveryState}`);
       setBootIssue(null);
     } catch (error) {
@@ -446,8 +434,9 @@ export const App = (): React.JSX.Element => {
               value={passphraseDraft}
               onChange={(event) => setPassphraseDraft(event.target.value)}
             />
+            <span className="field-note">Not stored. Re-enter to reconnect after restart.</span>
           </label>
-          <button type="submit">{roomJoined ? 'Rejoin room' : 'Join local room'}</button>
+          <button type="submit">{roomJoined ? 'Reconnect room' : 'Join local room'}</button>
         </form>
 
         <nav className="conversation-list" aria-label="Conversations">
@@ -469,31 +458,38 @@ export const App = (): React.JSX.Element => {
             </span>
             <span>
               <strong>Broadcast room</strong>
-              <small>{peers.length} mock peers</small>
+              <small>{peers.length} discovered peers</small>
             </span>
           </button>
 
-          {peers.map((peer) => (
-            <button
-              className={`conversation-row ${activeConversation?.peerId === peer.id ? 'selected' : ''}`}
-              type="button"
-              key={peer.id}
-              aria-pressed={activeConversation?.peerId === peer.id}
-              onClick={() => setActiveConversationId(`direct-${peer.id}`)}
-            >
-              <span className="avatar small" aria-hidden="true">
-                {getInitials(peer.displayName)}
-              </span>
-              <span>
-                <strong>{peer.displayName}</strong>
-                <small>
-                  <span className={`presence-dot ${peer.status}`} aria-hidden="true" />
-                  {peer.status === 'available' ? 'Same WiFi' : peer.status}
-                </small>
-              </span>
-              <em>{peer.tcpPort}</em>
-            </button>
-          ))}
+          {peers.length > 0 ? (
+            peers.map((peer) => (
+              <button
+                className={`conversation-row ${activeConversation?.peerId === peer.id ? 'selected' : ''}`}
+                type="button"
+                key={peer.id}
+                aria-pressed={activeConversation?.peerId === peer.id}
+                onClick={() => setActiveConversationId(`direct-${peer.id}`)}
+              >
+                <span className="avatar small" aria-hidden="true">
+                  {getInitials(peer.displayName)}
+                </span>
+                <span>
+                  <strong>{peer.displayName}</strong>
+                  <small>
+                    <span className={`presence-dot ${peer.status}`} aria-hidden="true" />
+                    {peer.status === 'available' ? 'Same WiFi' : peer.status}
+                  </small>
+                </span>
+                <em>{peer.tcpPort}</em>
+              </button>
+            ))
+          ) : (
+            <div className="empty-list">
+              <strong>No peers discovered</strong>
+              <span>Join the same room on another device or start the local simulator.</span>
+            </div>
+          )}
         </nav>
       </aside>
 
@@ -507,7 +503,7 @@ export const App = (): React.JSX.Element => {
             <p>
               {selectedPeer
                 ? `${selectedPeer.address} / TCP ${selectedPeer.tcpPort}`
-                : `${peers.length} peers receive broadcast messages`}
+                : `${peers.length} discovered peers receive broadcast messages`}
             </p>
           </div>
           <span className="send-state" aria-live="polite">
@@ -534,7 +530,7 @@ export const App = (): React.JSX.Element => {
           ) : (
             <div className="empty-thread">
               <strong>No messages yet</strong>
-              <span>Send a local mock message to exercise the Part 2 shell.</span>
+              <span>Messages will appear here after local sends or LAN delivery.</span>
             </div>
           )}
         </div>
@@ -570,7 +566,7 @@ export const App = (): React.JSX.Element => {
             </div>
             <div>
               <dt>Last seen</dt>
-              <dd>{selectedPeer ? formatLastSeen(selectedPeer.lastSeenAt) : 'Local mock state'}</dd>
+              <dd>{selectedPeer ? formatLastSeen(selectedPeer.lastSeenAt) : 'This device'}</dd>
             </div>
             <div>
               <dt>Peer ports</dt>
@@ -584,12 +580,12 @@ export const App = (): React.JSX.Element => {
         <section className="detail-section">
           <div className="section-heading">
             <span>Room security</span>
-            <strong>{roomJoined ? 'Passphrase set' : 'Waiting'}</strong>
+            <strong>{roomJoined && passphraseSubmitted ? 'Passphrase entered' : 'Needs passphrase'}</strong>
           </div>
           <p className="muted-copy">
-            {roomJoined
-              ? 'Passphrase was provided for this local session. It is not stored by the renderer.'
-              : 'Join a room with a passphrase before real LAN discovery starts.'}
+            {roomJoined && passphraseSubmitted
+              ? 'Passphrase was provided for this session only. It will be empty again after restart.'
+              : 'Passphrases are never stored. Re-enter the room passphrase to reconnect discovery.'}
           </p>
         </section>
 
