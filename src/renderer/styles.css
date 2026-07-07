@@ -1,3 +1,9 @@
+html,
+body,
+#root {
+  height: 100%;
+}
+
 :root {
   color: #182425;
   background: #eef3f1;
@@ -17,6 +23,7 @@ body {
   min-width: 0;
   min-height: 100vh;
   margin: 0;
+  overflow: hidden;
 }
 
 button,
@@ -38,7 +45,9 @@ button:disabled {
 .uchat-shell {
   display: grid;
   grid-template-columns: minmax(250px, 280px) minmax(420px, 1fr) minmax(290px, 330px);
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
   background:
     linear-gradient(180deg, rgb(255 255 255 / 82%), rgb(255 255 255 / 52%)),
     #eef3f1;
@@ -78,14 +87,14 @@ button:disabled {
 
 .pane {
   min-width: 0;
-  min-height: 100vh;
+  min-height: 0;
   border-right: 1px solid #d9e1dd;
   background: rgb(255 255 255 / 78%);
 }
 
 .left-pane,
 .right-pane {
-  overflow-y: auto;
+  overflow: hidden;
 }
 
 .left-pane {
@@ -94,6 +103,7 @@ button:disabled {
 }
 
 .right-pane {
+  overflow-y: auto;
   border-right: 0;
   border-left: 1px solid #d9e1dd;
   background: #fbfdfc;
@@ -326,8 +336,11 @@ button:focus-visible,
 
 .conversation-list {
   display: grid;
+  flex: 1;
+  min-height: 0;
   gap: 0.35rem;
   padding: 1rem 0;
+  overflow-y: auto;
 }
 
 .list-heading {
@@ -337,7 +350,7 @@ button:focus-visible,
 .conversation-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
+  align-items: start;
   gap: 0.75rem;
   width: 100%;
   border-left: 3px solid transparent;
@@ -360,17 +373,16 @@ button:focus-visible,
 
 .conversation-row strong {
   display: block;
-  overflow: hidden;
   color: #142225;
   font-size: 0.94rem;
   line-height: 1.2;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .conversation-row small {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
+  flex-wrap: wrap;
   gap: 0.35rem;
   margin-top: 0.24rem;
   font-size: 0.76rem;
@@ -378,9 +390,11 @@ button:focus-visible,
 }
 
 .conversation-row em {
+  align-self: center;
   color: #6a7b78;
   font-size: 0.72rem;
   font-style: normal;
+  white-space: nowrap;
 }
 
 .broadcast-row {
@@ -436,6 +450,8 @@ button:focus-visible,
 .chat-pane {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  min-height: 0;
+  overflow: hidden;
   background:
     radial-gradient(circle at 45% 22%, rgb(36 135 123 / 7%), transparent 36%),
     #ffffff;
@@ -444,10 +460,16 @@ button:focus-visible,
 .chat-header {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 0.85rem;
   min-height: 5.2rem;
   border-bottom: 1px solid #dfe7e3;
   padding: 1rem 1.35rem;
+}
+
+.chat-header > div:nth-child(2) {
+  min-width: 0;
+  flex: 1 1 16rem;
 }
 
 .chat-header h2 {
@@ -457,10 +479,12 @@ button:focus-visible,
 .chat-header p {
   margin: 0.22rem 0 0;
   font-size: 0.82rem;
+  overflow-wrap: anywhere;
 }
 
 .send-state {
   margin-left: auto;
+  flex: 0 0 auto;
   border: 1px solid #d7e4df;
   border-radius: 999px;
   padding: 0.34rem 0.62rem;
@@ -524,6 +548,7 @@ button:focus-visible,
   color: #162224;
   font-size: 0.98rem;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .message-bubble footer {
@@ -539,7 +564,8 @@ button:focus-visible,
 .empty-thread {
   display: grid;
   place-items: center;
-  min-height: 55%;
+  min-height: 100%;
+  padding: 2rem 1rem;
   color: #233331;
   text-align: center;
 }
@@ -562,6 +588,7 @@ button:focus-visible,
   border-top: 1px solid #dfe7e3;
   padding: 0.95rem 1.35rem;
   background: rgb(255 255 255 / 86%);
+  box-shadow: 0 -10px 24px rgb(37 69 63 / 6%);
 }
 
 .composer textarea {
@@ -629,6 +656,7 @@ button:focus-visible,
   font-size: 0.82rem;
   font-weight: 700;
   text-align: right;
+  overflow-wrap: anywhere;
 }
 
 .muted-copy {
@@ -712,8 +740,7 @@ button:focus-visible,
   color: #283837;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
   font-size: 0.76rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .wide {
@@ -797,8 +824,26 @@ button:focus-visible,
 }
 
 @media (max-width: 720px) {
+  body {
+    overflow: auto;
+  }
+
   .uchat-shell {
     grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
+  }
+
+  .chat-pane {
+    grid-row: 1;
+  }
+
+  .left-pane {
+    grid-row: 2;
+  }
+
+  .right-pane {
+    grid-row: 3;
   }
 
   .pane {
@@ -817,6 +862,10 @@ button:focus-visible,
   .composer,
   .profile-card {
     grid-template-columns: 1fr;
+  }
+
+  .send-state {
+    margin-left: 0;
   }
 
   .profile-card .secondary-button {
