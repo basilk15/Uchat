@@ -11,6 +11,11 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin()],
     resolve: {
       alias: sharedAlias
+    },
+    build: {
+      rollupOptions: {
+        external: ['better-sqlite3']
+      }
     }
   },
   preload: {

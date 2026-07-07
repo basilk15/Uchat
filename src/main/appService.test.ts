@@ -19,7 +19,7 @@ import {
   type UchatAppServiceOptions
 } from './appService';
 import type { UdpDiscoveryServiceConfig, UdpDiscoveryServiceEvents } from './discovery';
-import { createJsonFileStorage } from './storage/jsonFileStorage';
+import { createSqliteStorage } from './storage/sqliteStorage';
 import type { TcpConnectOptions, TcpEncryptedMessage, TcpSession, TcpSessionManagerConfig, TcpSessionManagerEvents } from './tcp/session';
 
 class FakeDiscoveryRuntime implements DiscoveryRuntime {
@@ -142,10 +142,10 @@ const createPeer = (id: string, overrides: Partial<Peer> = {}): Peer => ({
 
 const createHarness = async (
   overrides: Pick<UchatAppServiceOptions, 'checkConfiguredPorts' | 'getLanInterfaces'> = {},
-  seedStorage?: (storage: ReturnType<typeof createJsonFileStorage>) => Promise<void>
+  seedStorage?: (storage: ReturnType<typeof createSqliteStorage>) => Promise<void>
 ) => {
   const directory = await mkdtemp(join(tmpdir(), 'uchat-app-service-'));
-  const storage = createJsonFileStorage(join(directory, 'storage.json'));
+  const storage = createSqliteStorage(join(directory, 'uchat.sqlite3'));
   await seedStorage?.(storage);
   const networkEvents: string[] = [];
   const peerEvents: Peer[] = [];

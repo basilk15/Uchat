@@ -5,10 +5,16 @@ Use this checklist before tagging a LAN-testable MVP build. It is intentionally 
 ## Production Packaging
 
 - Current build command: `pnpm build`.
-- Packaging status: not enabled in this pass because the project does not yet include a packaging dependency, and adding one changes the dependency graph beyond the existing green MVP baseline.
-- Next packaging evaluation: run `pnpm add -D electron-builder`, then add a `dist:linux` script such as `pnpm build && electron-builder --linux AppImage dir`.
-- Suggested package metadata to evaluate with `electron-builder`: `appId=local.uchat.app`, `productName=Uchat`, `directories.output=release`, and Linux targets `AppImage` plus unpacked `dir`.
-- Icon follow-up: add a 512x512 PNG at `build/icon.png` and point the Linux packaging config at that path.
+- Unpacked Linux package command: `pnpm pack:linux`.
+- AppImage plus unpacked Linux package command: `pnpm dist:linux`.
+- Packaging tool: `electron-builder`.
+- Package metadata: `appId=local.uchat.app`, `productName=Uchat`, `desktopName=Uchat`, `directories.output=release`, Linux category `Network`, and Linux targets `AppImage` plus unpacked `dir`.
+- Packaging output directory: `release/`.
+- Current artifact path after a successful `pnpm dist:linux`: `release/Uchat-0.1.0-x86_64.AppImage`.
+- Current unpacked app path after a successful `pnpm dist:linux`: `release/linux-unpacked/uchat`.
+- Native dependency note: `better-sqlite3` must stay external to the Electron main bundle, be included with its runtime helper packages, and have `.node` files unpacked from `app.asar`.
+- Electron ABI note: `pnpm dist:linux` runs Electron Builder's native dependency rebuild for the packaged Electron runtime. `pnpm rebuild:sqlite-electron` also stages an Electron ABI copy under `native/` while restoring the local Node ABI for Vitest.
+- Icon status: no custom icon is configured yet. The current packaging pass relies on the default Electron icon; add a 512x512 PNG at `build/icon.png` before a branded public release.
 
 ## Startup And Shutdown
 

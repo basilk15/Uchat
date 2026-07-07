@@ -3,7 +3,7 @@ import { join } from 'node:path';
 import { UCHAT_IPC } from '@shared/ipc';
 import type { ChatMessage, JoinRoomInput, NetworkEvent, Peer, SendMessageInput, SetProfileInput } from '@shared/types';
 import { createUchatAppService, type UchatAppService } from './appService';
-import { createJsonFileStorage } from './storage/jsonFileStorage';
+import { createSqliteStorage } from './storage/sqliteStorage';
 import { resolveRendererUrlToLoad } from './rendererUrl';
 
 let mainWindow: BrowserWindow | null = null;
@@ -90,7 +90,7 @@ const registerIpcHandlers = (service: UchatAppService): void => {
 };
 
 app.whenReady().then(() => {
-  const storage = createJsonFileStorage(join(app.getPath('userData'), 'storage.json'));
+  const storage = createSqliteStorage(join(app.getPath('userData'), 'uchat.sqlite3'));
   const service = createUchatAppService(storage, emitNetworkEvent, {
     onPeerUpdated: emitPeerUpdated,
     onMessageReceived: emitMessageReceived

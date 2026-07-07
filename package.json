@@ -2,28 +2,38 @@
   "name": "uchat",
   "version": "0.1.0",
   "description": "A lightweight LAN messenger for Linux desktops.",
+  "author": "Uchat contributors",
   "private": true,
   "type": "module",
+  "desktopName": "Uchat",
   "main": "out/main/index.js",
   "scripts": {
     "dev": "NO_SANDBOX=1 electron-vite dev -- --disable-gpu --disable-gpu-compositing",
-    "build": "tsc --noEmit && electron-vite build",
+    "build": "pnpm rebuild:sqlite-electron && tsc --noEmit && electron-vite build",
+    "pack:linux": "pnpm build && electron-builder --linux dir",
+    "dist:linux": "pnpm build && electron-builder --linux AppImage dir",
+    "postinstall": "node scripts/rebuild-sqlite-electron.cjs",
     "peer:sim": "tsx scripts/uchat-peer-sim.ts",
+    "rebuild:sqlite-electron": "node scripts/rebuild-sqlite-electron.cjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
+    "better-sqlite3": "^12.11.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.1.0",
     "@eslint/js": "^9.17.0",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.2",
     "@types/react-dom": "^19.0.2",
     "electron": "^33.2.1",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^2.3.0",
     "eslint": "^9.17.0",
     "globals": "^15.14.0",
@@ -32,5 +42,41 @@
     "typescript-eslint": "^8.18.2",
     "vite": "^6.0.5",
     "vitest": "^2.1.8"
+  },
+  "build": {
+    "appId": "local.uchat.app",
+    "productName": "Uchat",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "out/**/*",
+      "package.json",
+      "node_modules/better-sqlite3/**/*",
+      "node_modules/bindings/**/*",
+      "node_modules/file-uri-to-path/**/*"
+    ],
+    "asarUnpack": [
+      "**/*.node",
+      "node_modules/better-sqlite3/build/Release/*.node"
+    ],
+    "extraResources": [
+      {
+        "from": "native",
+        "to": "native",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "linux": {
+      "target": [
+        "AppImage",
+        "dir"
+      ],
+      "category": "Network",
+      "syncDesktopName": true,
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    }
   }
 }

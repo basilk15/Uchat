@@ -2,25 +2,25 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
-import { JsonFileStorage } from './jsonFileStorage';
+import { SqliteStorage } from './sqliteStorage';
 import { StorageError } from './types';
 
 const tempDirs: string[] = [];
 
-const createStorage = async (): Promise<JsonFileStorage> => {
-  const directory = await mkdtemp(join(tmpdir(), 'uchat-storage-'));
+const createStorage = async (): Promise<SqliteStorage> => {
+  const directory = await mkdtemp(join(tmpdir(), 'uchat-sqlite-storage-'));
   tempDirs.push(directory);
-  return new JsonFileStorage(join(directory, 'storage.json'));
+  return new SqliteStorage(join(directory, 'uchat.sqlite3'));
 };
 
 afterEach(async () => {
   await Promise.all(tempDirs.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
 });
 
-describe('JsonFileStorage', () => {
+describe('SqliteStorage', () => {
   it('persists profile and room settings across storage instances', async () => {
     const storage = await createStorage();
-    const filePath = join(tempDirs[0], 'storage.json');
+    const filePath = join(tempDirs[0], 'uchat.sqlite3');
 
     await storage.setProfile({ displayName: 'Ada', status: 'busy' });
     await storage.setRoom({
@@ -31,7 +31,7 @@ describe('JsonFileStorage', () => {
     });
     await storage.close();
 
-    const reopened = new JsonFileStorage(filePath);
+    const reopened = new SqliteStorage(filePath);
     const state = await reopened.getAppState();
 
     expect(state.profile).toEqual({ displayName: 'Ada', status: 'busy' });
@@ -41,6 +41,8 @@ describe('JsonFileStorage', () => {
       udpPort: 49001,
       tcpPort: 49002
     });
+
+    await reopened.close();
   });
 
   it('creates and lists conversations and messages in chronological order', async () => {
@@ -78,7 +80,7 @@ describe('JsonFileStorage', () => {
 
   it('persists created messages across storage instances', async () => {
     const storage = await createStorage();
-    const filePath = join(tempDirs[0], 'storage.json');
+    const filePath = join(tempDirs[0], 'uchat.sqlite3');
     const message = await storage.createMessage({
       conversationId: 'broadcast',
       body: 'hello LAN',
@@ -87,9 +89,10 @@ describe('JsonFileStorage', () => {
     });
 
     await storage.close();
-    const reopened = new JsonFileStorage(filePath);
+    const reopened = new SqliteStorage(filePath);
 
     await expect(reopened.listMessages('broadcast')).resolves.toEqual([message]);
+    await reopened.close();
   });
 
   it('allows valid delivery state transitions', async () => {
@@ -129,5 +132,45 @@ describe('JsonFileStorage', () => {
         deliveryState: 'sending'
       })
     ).rejects.toBeInstanceOf(StorageError);
+  });
+
+  it('clears runtime peers without deleting persisted chat history', async () => {
+    const storage = await createStorage();
+    const message = await storage.createMessage({
+      conversationId: 'broadcast',
+      body: 'kept',
+      author: 'local',
+      deliveryState: 'sent'
+    });
+    await storage.upsertPeer({
+      id: 'peer-a',
+      displayName: 'Peer A',
+      status: 'available',
+      address: '127.0.0.1',
+      udpPort: 47475,
+      tcpPort: 47476,
+      publicKey: 'public-key',
+      roomFingerprint: 'room',
+      capabilities: ['discovery', 'tcp-session', 'chat'],
+      lastSeenAt: '2026-07-05T10:00:00.000Z'
+    });
+
+    await storage.clearPeers();
+
+    await expect(storage.listPeers()).resolves.toEqual([]);
+    await expect(storage.listMessages('broadcast')).resolves.toEqual([message]);
+  });
+
+  it('keeps only the latest network events', async () => {
+    const storage = await createStorage();
+
+    for (let index = 0; index < 55; index += 1) {
+      await storage.addNetworkEvent({ message: `event-${index}` });
+    }
+
+    const state = await storage.getAppState();
+    expect(state.networkEvents).toHaveLength(50);
+    expect(state.networkEvents[0]?.message).toBe('event-54');
+    expect(state.networkEvents.some((event) => event.message === 'event-0')).toBe(false);
   });
 });
