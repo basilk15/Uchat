@@ -26,7 +26,8 @@ import {
 } from '../src/main/appService';
 import { createLocalDiscoveryPeer } from '../src/main/discovery';
 import { deriveRoomKey, generateX25519Identity, type DerivedRoomKey, type X25519Identity } from '../src/main/security/crypto';
-import { createJsonFileStorage, type JsonFileStorage } from '../src/main/storage/jsonFileStorage';
+import { createSqliteStorage } from '../src/main/storage/sqliteStorage';
+import type { UchatStorage } from '../src/main/storage/types';
 import { encodeTcpFrame } from '../src/main/tcp/framing';
 import {
   TcpSessionError,
@@ -681,12 +682,12 @@ const createAppServiceHarness = async (
   passphrase: string
 ): Promise<{
   service: UchatAppService;
-  storage: JsonFileStorage;
+  storage: UchatStorage;
   discovery: ControlledDiscoveryRuntime;
   networkEvents: NetworkEvent[];
 }> => {
   const directory = await mkdtemp(join(tmpdir(), 'uchat-load-service-'));
-  const storage = createJsonFileStorage(join(directory, 'state.json')) as JsonFileStorage;
+  const storage = createSqliteStorage(join(directory, 'state.sqlite'));
   const networkEvents: NetworkEvent[] = [];
   let discoveryRuntime: ControlledDiscoveryRuntime | null = null;
   const createDiscoveryService: DiscoveryServiceFactory = (_, events) => {
@@ -829,9 +830,9 @@ const runAppServiceScenarios = async (): Promise<ScenarioResult> => {
   }
 };
 
-const runJsonStoragePressure = async (): Promise<ScenarioResult> => {
-  const directory = await mkdtemp(join(tmpdir(), 'uchat-json-storage-'));
-  const storage = createJsonFileStorage(join(directory, 'state.json')) as JsonFileStorage;
+const runSqliteStoragePressure = async (): Promise<ScenarioResult> => {
+  const directory = await mkdtemp(join(tmpdir(), 'uchat-sqlite-storage-'));
+  const storage = createSqliteStorage(join(directory, 'state.sqlite'));
   const totalMessages = 250;
 
   try {
@@ -863,7 +864,7 @@ const runJsonStoragePressure = async (): Promise<ScenarioResult> => {
     const snapshot = await storage.getAppState();
 
     return {
-      name: 'json-storage-pressure',
+      name: 'sqlite-storage-pressure',
       metrics: {
         messages_written: totalMessages,
         total_snapshot_messages: snapshot.messages.length,
@@ -892,7 +893,7 @@ const main = async (): Promise<void> => {
     runMalformedFrameScenario,
     runWrongPassphraseAndRestart,
     runAppServiceScenarios,
-    runJsonStoragePressure
+    runSqliteStoragePressure
   ];
 
   for (const scenario of scenarios) {

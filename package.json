@@ -8,7 +8,7 @@
   "desktopName": "Uchat",
   "main": "out/main/index.js",
   "scripts": {
-    "dev": "NO_SANDBOX=1 electron-vite dev -- --disable-gpu --disable-gpu-compositing",
+    "dev": "NO_SANDBOX=1 electron-vite dev -- --no-sandbox --disable-gpu --disable-gpu-compositing",
     "build": "pnpm rebuild:sqlite-electron && tsc --noEmit && electron-vite build",
     "pack:linux": "pnpm build && electron-builder --linux dir",
     "dist:linux": "pnpm build && electron-builder --linux AppImage dir",

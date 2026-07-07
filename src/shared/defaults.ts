@@ -42,7 +42,7 @@ export const createInitialAppState = (): UchatAppState => {
       {
         id: 'stub-event-0',
         level: 'info',
-        message: 'Uchat app shell loaded. LAN networking is not started in Part 1.',
+        message: 'Uchat is ready. Join a room to start LAN discovery and messaging.',
         createdAt
       }
     ]
