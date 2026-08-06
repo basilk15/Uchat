@@ -1,6 +1,7 @@
-# Uchat
-
-![Uchat logo](assets/uchat-logo.svg)
+<div align="center">
+  <h1>Uchat</h1>
+  <p><img src="assets/uchat-logo.svg" alt="Uchat logo" width="180"></p>
+</div>
 
 Lightweight, private-by-design LAN messaging for Linux desktops. Uchat discovers peers on the local network and sends encrypted direct or broadcast messages without a central server.
 
