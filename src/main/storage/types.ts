@@ -22,6 +22,7 @@ export interface UchatStorage {
   setRoom(input: RoomState): Promise<RoomState>;
   listPeers(): Promise<Peer[]>;
   upsertPeer(peer: Peer): Promise<Peer>;
+  removePeer(peerId: string): Promise<boolean>;
   clearPeers(): Promise<void>;
   listConversations(): Promise<UchatAppState['conversations']>;
   createConversation(input: CreateConversationInput): Promise<UchatAppState['conversations'][number]>;

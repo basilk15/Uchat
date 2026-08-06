@@ -50,6 +50,11 @@ class FakeDiscoveryRuntime implements DiscoveryRuntime {
     this.peers.set(peer.id, peer);
     this.events.onPeerUpdated?.(peer);
   }
+
+  emitPeerRemoved(peerId: string): void {
+    this.peers.delete(peerId);
+    this.events.onPeerRemoved?.(peerId);
+  }
 }
 
 class FakeTcpSessionRuntime implements TcpSessionRuntime {
@@ -149,6 +154,7 @@ const createHarness = async (
   await seedStorage?.(storage);
   const networkEvents: string[] = [];
   const peerEvents: Peer[] = [];
+  const peerRemovedEvents: string[] = [];
   const messageEvents: ChatMessage[] = [];
   const discoveryRuntimes: FakeDiscoveryRuntime[] = [];
   const tcpRuntimes: FakeTcpSessionRuntime[] = [];
@@ -188,6 +194,7 @@ const createHarness = async (
       checkConfiguredPorts: defaultCheckConfiguredPorts,
       getLanInterfaces: () => [{ name: 'wlan0', address: '192.168.18.80' }],
       onPeerUpdated: (peer) => peerEvents.push(peer),
+      onPeerRemoved: (peerId) => peerRemovedEvents.push(peerId),
       onMessageReceived: (message) => messageEvents.push(message),
       ...overrides
     }
@@ -198,6 +205,7 @@ const createHarness = async (
     storage,
     networkEvents,
     peerEvents,
+    peerRemovedEvents,
     messageEvents,
     discoveryRuntimes,
     tcpRuntimes
@@ -377,6 +385,42 @@ describe('createUchatAppService discovery integration', () => {
     await expect(storage.listPeers()).resolves.toEqual([peer]);
     expect(peerEvents).toEqual([peer]);
 
+    await service.cleanup();
+  });
+
+  it('removes departed peers from live and persisted state while keeping direct history offline', async () => {
+    const { service, storage, discoveryRuntimes, peerRemovedEvents } = await createHarness();
+    const peer = createPeer('peer-a');
+
+    await service.joinRoom({ roomName: 'Room', passphrase: 'secret' });
+    discoveryRuntimes[0].emitPeerUpdated(peer);
+    await waitFor(async () => (await storage.listPeers()).some((current) => current.id === peer.id));
+    await storage.createConversation({
+      id: 'direct-peer-a',
+      kind: 'direct',
+      title: peer.displayName,
+      peerId: peer.id
+    });
+
+    discoveryRuntimes[0].emitPeerRemoved(peer.id);
+    await waitFor(async () => (await storage.listPeers()).every((current) => current.id !== peer.id));
+
+    await expect(service.listPeers()).resolves.toEqual([]);
+    await expect(service.getAppState()).resolves.toEqual(expect.objectContaining({ peers: [] }));
+    await expect(storage.listConversations()).resolves.toContainEqual(
+      expect.objectContaining({
+        id: 'direct-peer-a',
+        peerId: peer.id
+      })
+    );
+    expect(peerRemovedEvents).toEqual([peer.id]);
+
+    const message = await service.sendMessage({
+      conversationId: 'direct-peer-a',
+      body: 'are you back?'
+    });
+
+    expect(message.deliveryState).toBe('unsent');
     await service.cleanup();
   });
 

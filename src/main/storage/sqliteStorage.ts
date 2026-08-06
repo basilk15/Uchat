@@ -234,6 +234,11 @@ export class SqliteStorage implements UchatStorage {
     return peer;
   }
 
+  async removePeer(peerId: string): Promise<boolean> {
+    const result = this.#db.prepare('DELETE FROM peers WHERE id = ?').run(peerId);
+    return result.changes > 0;
+  }
+
   async clearPeers(): Promise<void> {
     this.#db.prepare('DELETE FROM peers').run();
   }

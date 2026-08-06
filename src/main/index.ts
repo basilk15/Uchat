@@ -72,6 +72,10 @@ const emitPeerUpdated = (peer: Peer): void => {
   mainWindow?.webContents.send(UCHAT_IPC.peerUpdated, peer);
 };
 
+const emitPeerRemoved = (peerId: string): void => {
+  mainWindow?.webContents.send(UCHAT_IPC.peerRemoved, peerId);
+};
+
 const emitMessageReceived = (message: ChatMessage): void => {
   mainWindow?.webContents.send(UCHAT_IPC.messageReceived, message);
 };
@@ -93,6 +97,7 @@ app.whenReady().then(() => {
   const storage = createSqliteStorage(join(app.getPath('userData'), 'uchat.sqlite3'));
   const service = createUchatAppService(storage, emitNetworkEvent, {
     onPeerUpdated: emitPeerUpdated,
+    onPeerRemoved: emitPeerRemoved,
     onMessageReceived: emitMessageReceived
   });
   appService = service;

@@ -115,6 +115,7 @@ export interface UchatAPI {
   listConversations(): Promise<Conversation[]>;
   sendMessage(input: SendMessageInput): Promise<ChatMessage>;
   onPeerUpdated(callback: (peer: Peer) => void): () => void;
+  onPeerRemoved(callback: (peerId: string) => void): () => void;
   onMessageReceived(callback: (message: ChatMessage) => void): () => void;
   onNetworkEvent(callback: (event: NetworkEvent) => void): () => void;
 }

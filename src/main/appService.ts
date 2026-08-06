@@ -86,6 +86,7 @@ export interface UchatAppServiceOptions {
   checkConfiguredPorts?: (ports: ConfiguredPorts) => Promise<ConfiguredPortAvailability>;
   getLanInterfaces?: () => LanInterfaceSummary[];
   onPeerUpdated?: (peer: Peer) => void;
+  onPeerRemoved?: (peerId: string) => void;
   onMessageReceived?: (message: ChatMessage) => void;
 }
 
@@ -585,6 +586,13 @@ export const createUchatAppService = (
                   const message = error instanceof Error ? error.message : 'Unknown peer persistence error.';
                   void recordNetworkEvent(`Failed to persist discovered peer: ${message}`, 'error');
                 });
+            },
+            onPeerRemoved: (peerId) => {
+              options.onPeerRemoved?.(peerId);
+              void storage.removePeer(peerId).catch((error: unknown) => {
+                const message = error instanceof Error ? error.message : 'Unknown peer removal persistence error.';
+                void recordNetworkEvent(`Failed to remove departed peer: ${message}`, 'error');
+              });
             },
             onNetworkEvent: (message, level) => {
               void recordNetworkEvent(message, level);

@@ -161,6 +161,37 @@ describe('SqliteStorage', () => {
     await expect(storage.listMessages('broadcast')).resolves.toEqual([message]);
   });
 
+  it('removes one departed peer without clearing conversation history', async () => {
+    const storage = await createStorage();
+    const peer = {
+      id: 'peer-a',
+      displayName: 'Peer A',
+      status: 'available' as const,
+      address: '192.168.1.20',
+      udpPort: 47475,
+      tcpPort: 47476,
+      publicKey: 'public-key',
+      roomFingerprint: 'room',
+      capabilities: ['discovery', 'tcp-session', 'chat'],
+      lastSeenAt: '2026-07-05T10:00:00.000Z'
+    };
+
+    await storage.upsertPeer(peer);
+    await storage.createConversation({
+      id: 'direct-peer-a',
+      kind: 'direct',
+      title: peer.displayName,
+      peerId: peer.id
+    });
+
+    await expect(storage.removePeer(peer.id)).resolves.toBe(true);
+    await expect(storage.removePeer(peer.id)).resolves.toBe(false);
+    await expect(storage.listPeers()).resolves.toEqual([]);
+    await expect(storage.listConversations()).resolves.toContainEqual(
+      expect.objectContaining({ id: 'direct-peer-a', peerId: peer.id })
+    );
+  });
+
   it('keeps only the latest network events', async () => {
     const storage = await createStorage();
 

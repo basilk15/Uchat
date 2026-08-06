@@ -19,9 +19,9 @@ const uchat: UchatAPI = {
   listConversations: () => ipcRenderer.invoke(UCHAT_IPC.listConversations),
   sendMessage: (input) => ipcRenderer.invoke(UCHAT_IPC.sendMessage, input),
   onPeerUpdated: (callback) => on<Peer>(UCHAT_IPC.peerUpdated, callback),
+  onPeerRemoved: (callback) => on<string>(UCHAT_IPC.peerRemoved, callback),
   onMessageReceived: (callback) => on<ChatMessage>(UCHAT_IPC.messageReceived, callback),
   onNetworkEvent: (callback) => on<NetworkEvent>(UCHAT_IPC.networkEvent, callback)
 };
 
 contextBridge.exposeInMainWorld('uchat', Object.freeze(uchat));
-

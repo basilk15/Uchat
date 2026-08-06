@@ -106,6 +106,8 @@ const buildConversations = (base: Conversation[], peers: Peer[]): Conversation[]
   return mergeById([broadcast, ...base.filter((conversation) => conversation.id !== 'broadcast'), ...directConversations]);
 };
 
+const removePeerById = (peers: Peer[], peerId: string): Peer[] => peers.filter((peer) => peer.id !== peerId);
+
 const createLocalMessage = (conversationId: string, body: string): ChatMessage => ({
   id: `local-${Date.now()}`,
   conversationId,
@@ -207,6 +209,19 @@ export const App = (): React.JSX.Element => {
       });
     });
 
+    const unsubscribePeerRemoved = api.onPeerRemoved((peerId) => {
+      setState((current) => {
+        if (!current) {
+          return current;
+        }
+
+        return {
+          ...current,
+          peers: removePeerById(current.peers, peerId)
+        };
+      });
+    });
+
     const unsubscribeMessage = api.onMessageReceived((message) => {
       setMessages((current) => mergeMessages([...current, message]));
     });
@@ -218,6 +233,7 @@ export const App = (): React.JSX.Element => {
     return () => {
       mounted = false;
       unsubscribePeer();
+      unsubscribePeerRemoved();
       unsubscribeMessage();
       unsubscribeEvent();
     };
@@ -232,6 +248,7 @@ export const App = (): React.JSX.Element => {
   const selectedPeer = activeConversation?.peerId
     ? peers.find((peer) => peer.id === activeConversation.peerId)
     : undefined;
+  const directConversationOffline = activeConversation?.kind === 'direct' && !selectedPeer;
   const visibleMessages = useMemo(
     () =>
       messages
@@ -503,6 +520,8 @@ export const App = (): React.JSX.Element => {
             <p>
               {selectedPeer
                 ? `${selectedPeer.address} / TCP ${selectedPeer.tcpPort}`
+                : directConversationOffline
+                  ? 'Peer offline — messages will be saved as unsent until they return.'
                 : `${peers.length} discovered peers receive broadcast messages`}
             </p>
           </div>
@@ -552,26 +571,32 @@ export const App = (): React.JSX.Element => {
       <aside className="pane right-pane" aria-label="Network and peer details">
         <section className="detail-section peer-summary">
           <div className="section-heading">
-            <span>{selectedPeer ? 'Peer details' : 'Room details'}</span>
-            <strong>{selectedPeer?.status ?? (roomJoined ? 'joined' : 'not joined')}</strong>
+            <span>{selectedPeer ? 'Peer details' : directConversationOffline ? 'Direct conversation' : 'Room details'}</span>
+            <strong>{selectedPeer?.status ?? (directConversationOffline ? 'offline' : roomJoined ? 'joined' : 'not joined')}</strong>
           </div>
           <div className="large-avatar" aria-hidden="true">
             {getInitials(selectedPeer?.displayName ?? activeConversation?.title ?? 'BR')}
           </div>
-          <h2>{selectedPeer?.displayName ?? state?.room.roomName ?? 'Broadcast room'}</h2>
+          <h2>
+            {selectedPeer?.displayName ?? (directConversationOffline ? activeConversation?.title : state?.room.roomName) ?? 'Broadcast room'}
+          </h2>
           <dl className="detail-list">
             <div>
               <dt>Address</dt>
-              <dd>{selectedPeer?.address ?? 'Same WiFi broadcast'}</dd>
+              <dd>{selectedPeer?.address ?? (directConversationOffline ? 'Unavailable while peer is offline' : 'Same WiFi broadcast')}</dd>
             </div>
             <div>
               <dt>Last seen</dt>
-              <dd>{selectedPeer ? formatLastSeen(selectedPeer.lastSeenAt) : 'This device'}</dd>
+              <dd>{selectedPeer ? formatLastSeen(selectedPeer.lastSeenAt) : directConversationOffline ? 'Unavailable' : 'This device'}</dd>
             </div>
             <div>
               <dt>Peer ports</dt>
               <dd>
-                UDP {selectedPeer?.udpPort ?? ports.udpPort} / TCP {selectedPeer?.tcpPort ?? ports.tcpPort}
+                {selectedPeer
+                  ? `UDP ${selectedPeer.udpPort} / TCP ${selectedPeer.tcpPort}`
+                  : directConversationOffline
+                    ? 'Unavailable'
+                    : `UDP ${ports.udpPort} / TCP ${ports.tcpPort}`}
               </dd>
             </div>
           </dl>
