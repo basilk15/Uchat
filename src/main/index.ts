@@ -1,7 +1,8 @@
 import { app, BrowserWindow, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { UCHAT_IPC } from '@shared/ipc';
-import type { ChatMessage, JoinRoomInput, NetworkEvent, Peer, SendMessageInput, SetProfileInput } from '@shared/types';
+import type { ChatMessage, NetworkEvent, Peer } from '@shared/types';
+import { parseJoinRoomInput, parseSendMessageInput, parseSetProfileInput } from '@shared/validation';
 import { createUchatAppService, type UchatAppService } from './appService';
 import { createSqliteStorage } from './storage/sqliteStorage';
 import { resolveRendererUrlToLoad } from './rendererUrl';
@@ -83,14 +84,18 @@ const emitMessageReceived = (message: ChatMessage): void => {
 const registerIpcHandlers = (service: UchatAppService): void => {
   ipcMain.handle(UCHAT_IPC.getAppState, () => service.getAppState());
 
-  ipcMain.handle(UCHAT_IPC.setProfile, (_event, input: SetProfileInput) => service.setProfile(input));
+  ipcMain.handle(UCHAT_IPC.setProfile, (_event, input: unknown) =>
+    service.setProfile(parseSetProfileInput(input))
+  );
 
-  ipcMain.handle(UCHAT_IPC.joinRoom, (_event, input: JoinRoomInput) => service.joinRoom(input));
+  ipcMain.handle(UCHAT_IPC.joinRoom, (_event, input: unknown) => service.joinRoom(parseJoinRoomInput(input)));
 
   ipcMain.handle(UCHAT_IPC.listPeers, () => service.listPeers());
   ipcMain.handle(UCHAT_IPC.listConversations, () => service.listConversations());
 
-  ipcMain.handle(UCHAT_IPC.sendMessage, (_event, input: SendMessageInput) => service.sendMessage(input));
+  ipcMain.handle(UCHAT_IPC.sendMessage, (_event, input: unknown) =>
+    service.sendMessage(parseSendMessageInput(input))
+  );
 };
 
 app.whenReady().then(() => {

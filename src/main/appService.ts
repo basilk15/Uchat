@@ -11,6 +11,7 @@ import type {
   SetProfileInput,
   UchatAppState
 } from '@shared/types';
+import { parseJoinRoomInput, parseSendMessageInput, parseSetProfileInput } from '@shared/validation';
 import {
   CHAT_ACK_CONTENT_TYPE,
   CHAT_MESSAGE_CONTENT_TYPE,
@@ -607,24 +608,23 @@ export const createUchatAppService = (
     getAppState: () => afterStartup(getAppStateWithLivePeers),
 
     async setProfile(input) {
+      const normalizedInput = parseSetProfileInput(input);
       return afterStartup(async () => {
-        const profile = await storage.setProfile({
-          displayName: input.displayName.trim() || 'Uchat user',
-          status: input.status
-        });
+        const profile = await storage.setProfile(normalizedInput);
         await recordNetworkEvent(`Profile set to ${profile.displayName}.`);
         return profile;
       });
     },
 
     async joinRoom(input) {
+      const normalizedInput = parseJoinRoomInput(input);
       return afterStartup(async () => {
-        const roomName = input.roomName.trim() || 'Local room';
-        const udpPort = input.udpPort ?? DEFAULT_DISCOVERY_PORT;
-        const tcpPort = input.tcpPort ?? DEFAULT_TCP_PORT;
+        const roomName = normalizedInput.roomName;
+        const udpPort = normalizedInput.udpPort ?? DEFAULT_DISCOVERY_PORT;
+        const tcpPort = normalizedInput.tcpPort ?? DEFAULT_TCP_PORT;
         const [state, roomKey, identity] = await Promise.all([
           storage.getAppState(),
-          deriveRoomKey(roomName, input.passphrase),
+          deriveRoomKey(roomName, normalizedInput.passphrase),
           Promise.resolve(generateX25519Identity())
         ]);
         const localPeer = createLocalDiscoveryPeer({
@@ -752,13 +752,11 @@ export const createUchatAppService = (
     listConversations: () => afterStartup(() => storage.listConversations()),
 
     async sendMessage(input) {
+      const normalizedInput = parseSendMessageInput(input);
       return afterStartup(async () => {
-        const body = input.body.trim();
-        if (!body) {
-          throw new Error('Message body cannot be empty.');
-        }
+        const body = normalizedInput.body;
 
-        const conversation = await resolveSendConversation(input.conversationId);
+        const conversation = await resolveSendConversation(normalizedInput.conversationId);
         const message = await storage.createMessage({
           conversationId: conversation.id,
           body,

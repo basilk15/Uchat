@@ -18,6 +18,39 @@ afterEach(async () => {
 });
 
 describe('SqliteStorage', () => {
+  it('rejects malformed and oversized writes before touching SQLite', async () => {
+    const storage = await createStorage();
+
+    await expect(
+      storage.setProfile({ displayName: 42 as never, status: 'available' })
+    ).rejects.toThrow('displayName must be a string');
+    await expect(
+      storage.setRoom({
+        roomName: 'Lab',
+        joined: true,
+        udpPort: '47475' as never,
+        tcpPort: 47476
+      })
+    ).rejects.toThrow('udpPort must be an integer');
+    await expect(
+      storage.createMessage({
+        conversationId: 'broadcast',
+        body: 'x'.repeat(8_193),
+        author: 'local'
+      })
+    ).rejects.toThrow('body must be at most 8192 characters');
+    await expect(storage.addNetworkEvent({ level: 'debug' as never, message: 'bad level' })).rejects.toThrow(
+      'level must be one of: info, warning, error'
+    );
+
+    await expect(storage.getAppState()).resolves.toEqual(
+      expect.objectContaining({
+        profile: expect.objectContaining({ displayName: 'Basil' }),
+        room: expect.objectContaining({ joined: false })
+      })
+    );
+  });
+
   it('persists profile and room settings across storage instances', async () => {
     const storage = await createStorage();
     const filePath = join(tempDirs[0], 'uchat.sqlite3');

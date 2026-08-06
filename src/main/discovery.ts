@@ -8,6 +8,11 @@ import {
   type DiscoveryPeerIdentity
 } from '@shared/discovery';
 import type { NetworkEvent, Peer } from '@shared/types';
+import {
+  normalizePort,
+  parseDiscoveryPeerIdentity,
+  parsePresenceStatus
+} from '@shared/validation';
 
 export const DEFAULT_DISCOVERY_BROADCAST_ADDRESS = '255.255.255.255';
 export const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
@@ -45,7 +50,14 @@ const toPeer = (packet: DiscoveryPacket, remoteInfo: RemoteInfo, nowMs: number):
   lastSeenAt: new Date(nowMs).toISOString()
 });
 
-const serializePacket = (packet: DiscoveryPacket): Buffer => Buffer.from(JSON.stringify(packet));
+const serializePacket = (packet: DiscoveryPacket): Buffer => {
+  const validation = validateDiscoveryPacket(packet, packet.peer.roomFingerprint);
+  if (!validation.ok) {
+    throw new Error(`Invalid discovery packet: ${validation.reason}.`);
+  }
+
+  return Buffer.from(JSON.stringify(validation.packet));
+};
 
 export class DiscoveryPeerRegistry {
   private readonly peers = new Map<string, PeerRegistryEntry>();
@@ -96,11 +108,12 @@ export class UdpDiscoveryService {
     config: UdpDiscoveryServiceConfig,
     private readonly events: UdpDiscoveryServiceEvents = {}
   ) {
-    const udpPort = config.udpPort ?? config.localPeer.udpPort ?? DEFAULT_DISCOVERY_PORT;
+    const localPeer = parseDiscoveryPeerIdentity(config.localPeer);
+    const udpPort = normalizePort(config.udpPort ?? localPeer.udpPort ?? DEFAULT_DISCOVERY_PORT, 'udpPort');
 
     this.config = {
       localPeer: {
-        ...config.localPeer,
+        ...localPeer,
         udpPort
       },
       udpPort,
@@ -251,13 +264,17 @@ export const createLocalDiscoveryPeer = (input: {
   udpPort?: number;
   tcpPort?: number;
   capabilities?: string[];
-}): DiscoveryPeerIdentity => ({
-  id: input.id,
-  displayName: input.displayName,
-  status: input.status,
-  udpPort: input.udpPort ?? DEFAULT_DISCOVERY_PORT,
-  tcpPort: input.tcpPort ?? DEFAULT_TCP_PORT,
-  publicKey: input.publicKey,
-  roomFingerprint: input.roomFingerprint,
-  capabilities: input.capabilities ?? []
-});
+}): DiscoveryPeerIdentity =>
+  parseDiscoveryPeerIdentity(
+    {
+      id: input.id,
+      displayName: input.displayName,
+      status: parsePresenceStatus(input.status),
+      udpPort: input.udpPort ?? DEFAULT_DISCOVERY_PORT,
+      tcpPort: input.tcpPort ?? DEFAULT_TCP_PORT,
+      publicKey: input.publicKey,
+      roomFingerprint: input.roomFingerprint,
+      capabilities: input.capabilities ?? []
+    },
+    { allowEphemeralTcpPort: true }
+  );

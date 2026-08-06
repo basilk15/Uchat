@@ -53,4 +53,35 @@ describe('discovery packet validation', () => {
 
     expect(validation).toEqual({ ok: false, reason: 'invalid-peer' });
   });
+
+  it('accepts the minimum and maximum valid wire ports', () => {
+    const validation = validateDiscoveryPacket(
+      createDiscoveryPacket('peer.heartbeat', {
+        ...peer,
+        udpPort: 1,
+        tcpPort: 65_535
+      })
+    );
+
+    expect(validation.ok).toBe(true);
+  });
+
+  it('rejects malformed runtime payload types and oversized JSON', () => {
+    expect(validateDiscoveryPacket(42)).toEqual({ ok: false, reason: 'invalid-shape' });
+    expect(
+      validateDiscoveryPacket(
+        JSON.stringify({
+          app: 'uchat',
+          protocolVersion: 1,
+          type: 'peer.hello',
+          peer: 'not an object',
+          sentAt: '2026-07-05T10:00:00.000Z'
+        })
+      )
+    ).toEqual({ ok: false, reason: 'invalid-peer' });
+    expect(validateDiscoveryPacket(JSON.stringify({ payload: 'x'.repeat(70_000) }))).toEqual({
+      ok: false,
+      reason: 'payload-too-large'
+    });
+  });
 });

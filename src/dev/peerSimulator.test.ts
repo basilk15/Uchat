@@ -43,4 +43,16 @@ describe('peer simulator helpers', () => {
       passphrase: 'secret'
     });
   });
+
+  it('rejects invalid CLI status, scope, and port values', () => {
+    expect(() => parsePeerSimulatorArgs(['--room', 'Lab', '--passphrase', 'secret', '--status', 'offline'])).toThrow(
+      'status must be one of: available, away, busy'
+    );
+    expect(() => parsePeerSimulatorArgs(['--room', 'Lab', '--passphrase', 'secret', '--tcp-port', '65536'])).toThrow(
+      'tcpPort must be an integer from 0 to 65535'
+    );
+    expect(() =>
+      parsePeerSimulatorArgs(['--room', 'Lab', '--passphrase', 'secret', '--send-scope', 'sideways'])
+    ).toThrow('send-scope must be either direct or broadcast');
+  });
 });

@@ -19,6 +19,18 @@ import type {
   UchatAppState,
   UpdateMessageDeliveryStateInput
 } from '@shared/types';
+import {
+  parseCreateConversationInput,
+  parseCreateMessageInput,
+  parseNetworkEventInput,
+  parsePeer,
+  parseRoomState,
+  parseSetProfileInput,
+  parseUpdateMessageDeliveryStateInput,
+  normalizeTimestamp,
+  isBoundedString,
+  VALIDATION_LIMITS
+} from '@shared/validation';
 import { StorageError, type AddNetworkEventInput, type UchatStorage } from './types';
 
 interface SettingsRow {
@@ -73,59 +85,97 @@ const parseCapabilities = (value: string | null): string[] | undefined => {
     return undefined;
   }
 
-  const parsed: unknown = JSON.parse(value);
-  return Array.isArray(parsed) && parsed.every((entry) => typeof entry === 'string') ? parsed : undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw new StorageError('Stored peer capabilities are not valid JSON.');
+  }
+
+  if (
+    Array.isArray(parsed) &&
+    parsed.length <= VALIDATION_LIMITS.capabilities &&
+    parsed.every((entry) => isBoundedString(entry, VALIDATION_LIMITS.capability))
+  ) {
+    return parsed;
+  }
+
+  throw new StorageError('Stored peer capabilities are invalid.');
 };
 
 const toPeer = (row: PeerRow): Peer => ({
-  id: row.id,
-  displayName: row.display_name,
-  status: row.status,
-  address: row.address,
-  udpPort: row.udp_port,
-  tcpPort: row.tcp_port,
-  publicKey: row.public_key ?? undefined,
-  roomFingerprint: row.room_fingerprint ?? undefined,
-  capabilities: parseCapabilities(row.capabilities_json),
-  lastSeenAt: row.last_seen_at
+  ...parsePeer({
+    id: row.id,
+    displayName: row.display_name,
+    status: row.status,
+    address: row.address,
+    udpPort: row.udp_port,
+    tcpPort: row.tcp_port,
+    publicKey: row.public_key ?? undefined,
+    roomFingerprint: row.room_fingerprint ?? undefined,
+    capabilities: parseCapabilities(row.capabilities_json),
+    lastSeenAt: row.last_seen_at
+  })
 });
 
-const toConversation = (row: ConversationRow): Conversation => ({
-  id: row.id,
-  kind: row.kind,
-  title: row.title,
-  peerId: row.peer_id ?? undefined,
-  createdAt: row.created_at,
-  updatedAt: row.updated_at
-});
+const toConversation = (row: ConversationRow): Conversation => {
+  const conversation = parseCreateConversationInput({
+    id: row.id,
+    kind: row.kind,
+    title: row.title,
+    peerId: row.peer_id ?? undefined
+  });
 
-const toMessage = (row: MessageRow): ChatMessage => ({
-  id: row.id,
-  conversationId: row.conversation_id,
-  body: row.body,
-  author: row.author,
-  deliveryState: row.delivery_state,
-  createdAt: row.created_at
-});
+  return {
+    id: conversation.id as string,
+    kind: conversation.kind,
+    title: conversation.title,
+    peerId: conversation.peerId,
+    createdAt: normalizeTimestamp(row.created_at, 'createdAt'),
+    updatedAt: normalizeTimestamp(row.updated_at, 'updatedAt')
+  };
+};
+
+const toMessage = (row: MessageRow): ChatMessage => {
+  const message = parseCreateMessageInput({
+    id: row.id,
+    conversationId: row.conversation_id,
+    body: row.body,
+    author: row.author,
+    deliveryState: row.delivery_state,
+    createdAt: row.created_at
+  });
+
+  if (!message.deliveryState) {
+    throw new StorageError(`Stored message ${row.id} is missing a delivery state.`);
+  }
+
+  return {
+    id: message.id as string,
+    conversationId: message.conversationId,
+    body: message.body,
+    author: message.author,
+    deliveryState: message.deliveryState,
+    createdAt: message.createdAt as string
+  };
+};
 
 const toNetworkEvent = (row: NetworkEventRow): NetworkEvent => ({
   id: row.id,
-  level: row.level,
-  message: row.message,
-  createdAt: row.created_at
+  ...parseNetworkEventInput({ level: row.level, message: row.message }),
+  createdAt: normalizeTimestamp(row.created_at, 'createdAt')
 });
 
-const toRoom = (row: SettingsRow): RoomState => ({
-  roomName: row.room_name,
-  joined: row.room_joined === 1,
-  udpPort: row.udp_port,
-  tcpPort: row.tcp_port
-});
+const toRoom = (row: SettingsRow): RoomState =>
+  parseRoomState({
+    roomName: row.room_name,
+    joined: row.room_joined === 1,
+    udpPort: row.udp_port,
+    tcpPort: row.tcp_port
+  });
 
-const toProfile = (row: SettingsRow): LocalProfile => ({
-  displayName: row.profile_display_name,
-  status: row.profile_status
-});
+const toProfile = (row: SettingsRow): LocalProfile =>
+  parseSetProfileInput({ displayName: row.profile_display_name, status: row.profile_status });
 
 const resolveElectronNativeBinding = (): string | undefined => {
   if (!process.versions.electron) {
@@ -179,17 +229,24 @@ export class SqliteStorage implements UchatStorage {
   }
 
   async setProfile(input: SetProfileInput): Promise<LocalProfile> {
+    const normalizedInput = parseSetProfileInput(input);
     this.#db
       .prepare('UPDATE app_settings SET profile_display_name = ?, profile_status = ? WHERE id = 1')
-      .run(input.displayName, input.status);
-    return input;
+      .run(normalizedInput.displayName, normalizedInput.status);
+    return normalizedInput;
   }
 
   async setRoom(input: RoomState): Promise<RoomState> {
+    const normalizedInput = parseRoomState(input);
     this.#db
       .prepare('UPDATE app_settings SET room_name = ?, room_joined = ?, udp_port = ?, tcp_port = ? WHERE id = 1')
-      .run(input.roomName, input.joined ? 1 : 0, input.udpPort, input.tcpPort);
-    return input;
+      .run(
+        normalizedInput.roomName,
+        normalizedInput.joined ? 1 : 0,
+        normalizedInput.udpPort,
+        normalizedInput.tcpPort
+      );
+    return normalizedInput;
   }
 
   async listPeers(): Promise<Peer[]> {
@@ -200,6 +257,7 @@ export class SqliteStorage implements UchatStorage {
   }
 
   async upsertPeer(peer: Peer): Promise<Peer> {
+    const normalizedPeer = parsePeer(peer);
     this.#db
       .prepare(
         `INSERT INTO peers (
@@ -219,19 +277,19 @@ export class SqliteStorage implements UchatStorage {
           last_seen_at = excluded.last_seen_at`
       )
       .run(
-        peer.id,
-        peer.displayName,
-        peer.status,
-        peer.address,
-        peer.udpPort,
-        peer.tcpPort,
-        peer.publicKey ?? null,
-        peer.roomFingerprint ?? null,
-        peer.capabilities ? JSON.stringify(peer.capabilities) : null,
-        peer.lastSeenAt
+        normalizedPeer.id,
+        normalizedPeer.displayName,
+        normalizedPeer.status,
+        normalizedPeer.address,
+        normalizedPeer.udpPort,
+        normalizedPeer.tcpPort,
+        normalizedPeer.publicKey ?? null,
+        normalizedPeer.roomFingerprint ?? null,
+        normalizedPeer.capabilities ? JSON.stringify(normalizedPeer.capabilities) : null,
+        normalizedPeer.lastSeenAt
       );
 
-    return peer;
+    return normalizedPeer;
   }
 
   async removePeer(peerId: string): Promise<boolean> {
@@ -251,12 +309,13 @@ export class SqliteStorage implements UchatStorage {
   }
 
   async createConversation(input: CreateConversationInput): Promise<Conversation> {
+    const normalizedInput = parseCreateConversationInput(input);
     const now = new Date().toISOString();
     const conversation: Conversation = {
-      id: input.id ?? randomUUID(),
-      kind: input.kind,
-      title: input.title,
-      peerId: input.peerId,
+      id: normalizedInput.id ?? randomUUID(),
+      kind: normalizedInput.kind,
+      title: normalizedInput.title,
+      peerId: normalizedInput.peerId,
       createdAt: now,
       updatedAt: now
     };
@@ -292,19 +351,22 @@ export class SqliteStorage implements UchatStorage {
   }
 
   async createMessage(input: CreateMessageInput): Promise<ChatMessage> {
+    const normalizedInput = parseCreateMessageInput(input);
     const createMessage = this.#db.transaction(() => {
-      const conversation = this.#db.prepare('SELECT id FROM conversations WHERE id = ?').get(input.conversationId);
+      const conversation = this.#db
+        .prepare('SELECT id FROM conversations WHERE id = ?')
+        .get(normalizedInput.conversationId);
       if (!conversation) {
-        throw new StorageError(`Conversation not found: ${input.conversationId}`);
+        throw new StorageError(`Conversation not found: ${normalizedInput.conversationId}`);
       }
 
-      const createdAt = input.createdAt ?? new Date().toISOString();
+      const createdAt = normalizedInput.createdAt ?? new Date().toISOString();
       const message: ChatMessage = {
-        id: input.id ?? randomUUID(),
-        conversationId: input.conversationId,
-        body: input.body,
-        author: input.author,
-        deliveryState: input.deliveryState ?? 'sending',
+        id: normalizedInput.id ?? randomUUID(),
+        conversationId: normalizedInput.conversationId,
+        body: normalizedInput.body,
+        author: normalizedInput.author,
+        deliveryState: normalizedInput.deliveryState ?? 'sending',
         createdAt
       };
 
@@ -319,7 +381,9 @@ export class SqliteStorage implements UchatStorage {
            VALUES (?, ?, ?, ?, ?, ?)`
         )
         .run(message.id, message.conversationId, message.body, message.author, message.deliveryState, message.createdAt);
-      this.#db.prepare('UPDATE conversations SET updated_at = ? WHERE id = ?').run(createdAt, input.conversationId);
+      this.#db
+        .prepare('UPDATE conversations SET updated_at = ? WHERE id = ?')
+        .run(createdAt, normalizedInput.conversationId);
 
       return message;
     });
@@ -328,35 +392,41 @@ export class SqliteStorage implements UchatStorage {
   }
 
   async updateMessageDeliveryState(input: UpdateMessageDeliveryStateInput): Promise<ChatMessage> {
-    const row = this.#db.prepare('SELECT * FROM messages WHERE id = ?').get(input.messageId) as
+    const normalizedInput = parseUpdateMessageDeliveryStateInput(input);
+    const row = this.#db.prepare('SELECT * FROM messages WHERE id = ?').get(normalizedInput.messageId) as
       | MessageRow
       | undefined;
     if (!row) {
-      throw new StorageError(`Message not found: ${input.messageId}`);
+      throw new StorageError(`Message not found: ${normalizedInput.messageId}`);
     }
 
     if (!isMessageDeliveryState(row.delivery_state)) {
-      throw new StorageError(`Stored message ${input.messageId} has invalid delivery state: ${row.delivery_state}`);
-    }
-
-    if (!canTransitionDeliveryState(row.delivery_state, input.deliveryState)) {
       throw new StorageError(
-        `Cannot transition message ${input.messageId} from ${row.delivery_state} to ${input.deliveryState}`
+        `Stored message ${normalizedInput.messageId} has invalid delivery state: ${row.delivery_state}`
       );
     }
 
-    this.#db.prepare('UPDATE messages SET delivery_state = ? WHERE id = ?').run(input.deliveryState, input.messageId);
+    if (!canTransitionDeliveryState(row.delivery_state, normalizedInput.deliveryState)) {
+      throw new StorageError(
+        `Cannot transition message ${normalizedInput.messageId} from ${row.delivery_state} to ${normalizedInput.deliveryState}`
+      );
+    }
+
+    this.#db
+      .prepare('UPDATE messages SET delivery_state = ? WHERE id = ?')
+      .run(normalizedInput.deliveryState, normalizedInput.messageId);
     return {
       ...toMessage(row),
-      deliveryState: input.deliveryState
+      deliveryState: normalizedInput.deliveryState
     };
   }
 
   async addNetworkEvent(input: AddNetworkEventInput): Promise<NetworkEvent> {
+    const normalizedInput = parseNetworkEventInput(input);
     const event: NetworkEvent = {
       id: randomUUID(),
-      level: input.level ?? 'info',
-      message: input.message,
+      level: normalizedInput.level,
+      message: normalizedInput.message,
       createdAt: new Date().toISOString()
     };
 

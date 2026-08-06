@@ -1,3 +1,5 @@
+import { isValidPort, MAX_PORT, MIN_PORT } from './validation';
+
 export type FirewallProtocol = 'udp' | 'tcp';
 
 export interface FirewallPortConfig {
@@ -11,11 +13,8 @@ export interface UfwAllowCommand {
   command: string;
 }
 
-const MIN_PORT = 1;
-const MAX_PORT = 65535;
-
 const assertValidPort = (port: number, label: string): void => {
-  if (!Number.isInteger(port) || port < MIN_PORT || port > MAX_PORT) {
+  if (!isValidPort(port)) {
     throw new RangeError(`${label} must be an integer from ${MIN_PORT} to ${MAX_PORT}.`);
   }
 };

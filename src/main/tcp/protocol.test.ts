@@ -54,6 +54,26 @@ describe('TCP session protocol validation', () => {
     expect(validation).toEqual({ ok: false, reason: 'unsupported-type' });
   });
 
+  it('rejects malformed and oversized control payloads', () => {
+    expect(validateTcpSessionControlMessage(42)).toEqual({ ok: false, reason: 'invalid-shape' });
+    expect(validateTcpSessionControlMessage(JSON.stringify({ payload: 'x'.repeat(70_000) }))).toEqual({
+      ok: false,
+      reason: 'payload-too-large'
+    });
+  });
+
+  it('rejects control peers outside the valid port range', () => {
+    const validation = validateTcpSessionControlMessage({
+      ...createSessionHelloMessage(peer),
+      peer: {
+        ...peer,
+        udpPort: 0
+      }
+    });
+
+    expect(validation).toEqual({ ok: false, reason: 'invalid-peer' });
+  });
+
   it('validates encrypted transport envelopes separately from control messages', () => {
     const frame = encryptFrame(Buffer.alloc(32, 1), 'secret payload', 'test.payload');
     const envelope = createEncryptedSessionEnvelope('test.payload', frame, '2026-07-05T10:00:00.000Z');

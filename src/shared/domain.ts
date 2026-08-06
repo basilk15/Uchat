@@ -1,12 +1,7 @@
 import type { MessageDeliveryState } from './types';
+import { MESSAGE_DELIVERY_STATES as VALIDATED_MESSAGE_DELIVERY_STATES } from './validation';
 
-export const MESSAGE_DELIVERY_STATES: readonly MessageDeliveryState[] = [
-  'sending',
-  'sent',
-  'delivered',
-  'failed',
-  'unsent'
-] as const;
+export const MESSAGE_DELIVERY_STATES: readonly MessageDeliveryState[] = VALIDATED_MESSAGE_DELIVERY_STATES;
 
 const DELIVERY_TRANSITIONS: Record<MessageDeliveryState, readonly MessageDeliveryState[]> = {
   sending: ['sent', 'failed', 'unsent'],

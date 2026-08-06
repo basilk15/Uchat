@@ -213,6 +213,20 @@ const createHarness = async (
 };
 
 describe('createUchatAppService discovery integration', () => {
+  it('rejects malformed application inputs before persistence or networking', async () => {
+    const { service } = await createHarness();
+
+    await expect(service.setProfile(null as never)).rejects.toThrow('expected an object');
+    await expect(
+      service.joinRoom({ roomName: 'Lab', passphrase: 'secret', tcpPort: 0 })
+    ).rejects.toThrow('tcpPort must be an integer from 1 to 65535');
+    await expect(
+      service.sendMessage({ conversationId: 'broadcast', body: 'x'.repeat(8_193) })
+    ).rejects.toThrow('body must be at most 8192 characters');
+
+    await service.cleanup();
+  });
+
   it('marks persisted joined rooms disconnected and clears stale peers on startup', async () => {
     const stalePeer = createPeer('stale-peer');
     const { service, storage, networkEvents, discoveryRuntimes, tcpRuntimes } = await createHarness(

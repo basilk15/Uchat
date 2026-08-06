@@ -5,6 +5,16 @@ import { DEFAULT_DISCOVERY_PORT } from '@shared/defaults';
 import type { DiscoveryPeerIdentity } from '@shared/discovery';
 import type { ChatMessage, Peer } from '@shared/types';
 import {
+  isRecord,
+  normalizePort,
+  normalizeText,
+  parseJsonPayload,
+  parsePeerMessageInput,
+  parsePresenceStatus,
+  VALIDATION_LIMITS,
+  ValidationError
+} from '@shared/validation';
+import {
   CHAT_ACK_CONTENT_TYPE,
   CHAT_MESSAGE_CONTENT_TYPE,
   createChatAckFrame,
@@ -105,7 +115,8 @@ const readRequestBody = async (req: IncomingMessage): Promise<string> => {
   return Buffer.concat(chunks).toString('utf8');
 };
 
-const normalizeBody = (body: string): string => body.trim();
+const normalizeBody = (body: string): string =>
+  parsePeerMessageInput({ body }).body;
 
 const createReplyBody = (template: string, inboundBody: string): string =>
   template
@@ -660,12 +671,16 @@ export const createPeerSimulator = (options: PeerSimulatorOptions): PeerSimulato
     scope?: PeerMessageScope;
     targetPeerId?: string;
   }): Promise<void> => {
-    const body = normalizeBody(input.body);
-    if (!body) {
-      throw new Error('Message body cannot be empty.');
+    if (!isRecord(input)) {
+      throw new ValidationError('Invalid simulator message input: expected an object.');
     }
 
+    const messageInput = parsePeerMessageInput({ body: input.body, targetPeerId: input.targetPeerId });
+    const body = messageInput.body;
     const scope = input.scope ?? 'direct';
+    if (scope !== 'direct' && scope !== 'broadcast') {
+      throw new ValidationError('scope must be either direct or broadcast.', 'scope');
+    }
 
     if (scope === 'broadcast') {
       const peers = getConnectedPeers().length > 0 ? getConnectedPeers() : Array.from(knownPeers.values());
@@ -838,10 +853,15 @@ export const createPeerSimulator = (options: PeerSimulatorOptions): PeerSimulato
 
         if (req.method === 'POST' && (url.pathname === '/api/message' || url.pathname === '/api/broadcast')) {
           const rawBody = await readRequestBody(req);
-          const parsed = rawBody ? (JSON.parse(rawBody) as { body?: string; targetPeerId?: string }) : {};
+          const parsed = parseJsonPayload(rawBody, Math.min(MAX_BODY_BYTES, VALIDATION_LIMITS.protocolPayloadBytes));
+          if (!parsed.ok) {
+            throw new ValidationError(`Invalid request payload: ${parsed.reason}.`);
+          }
+
+          const messageInput = parsePeerMessageInput(parsed.value);
           await sendMessage({
-            body: parsed.body ?? '',
-            targetPeerId: parsed.targetPeerId,
+            body: messageInput.body,
+            targetPeerId: messageInput.targetPeerId,
             scope: url.pathname === '/api/broadcast' ? 'broadcast' : 'direct'
           });
           res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
@@ -1060,17 +1080,28 @@ export const parsePeerSimulatorArgs = (argv: string[]): PeerSimulatorOptions => 
   const [positionalRoom, positionalPassphrase] = result.positionals;
   const roomName = result.values.room ?? positionalRoom ?? '';
   const passphrase = result.values.passphrase ?? positionalPassphrase ?? '';
-  const sendScope = result.values['send-scope'] === 'broadcast' ? 'broadcast' : 'direct';
+  const rawSendScope = result.values['send-scope'];
+  if (rawSendScope !== undefined && rawSendScope !== 'direct' && rawSendScope !== 'broadcast') {
+    throw new ValidationError('send-scope must be either direct or broadcast.', 'send-scope');
+  }
+  const sendScope = rawSendScope === 'broadcast' ? 'broadcast' : 'direct';
+  const parseCliPort = (value: string | undefined, field: string, allowZero = false): number | undefined =>
+    value === undefined ? undefined : normalizePort(Number(value), field, allowZero);
 
   return {
     roomName,
     passphrase,
-    displayName: result.values['display-name'],
-    status: result.values.status === 'away' || result.values.status === 'busy' ? result.values.status : 'available',
-    udpPort: result.values['udp-port'] ? Number.parseInt(result.values['udp-port'], 10) : undefined,
-    tcpPort: result.values['tcp-port'] ? Number.parseInt(result.values['tcp-port'], 10) : undefined,
+    displayName:
+      result.values['display-name'] === undefined
+        ? undefined
+        : normalizeText(result.values['display-name'], 'displayName', VALIDATION_LIMITS.displayName),
+    status: result.values.status === undefined ? 'available' : parsePresenceStatus(result.values.status),
+    udpPort: parseCliPort(result.values['udp-port'], 'udpPort'),
+    tcpPort: parseCliPort(result.values['tcp-port'], 'tcpPort', true),
     httpHost: result.values['http-host'],
-    httpPort: result.values.web ? Number.parseInt(result.values['http-port'] ?? String(DEFAULT_BROWSER_PORT), 10) : undefined,
+    httpPort: result.values.web
+      ? parseCliPort(result.values['http-port'] ?? String(DEFAULT_BROWSER_PORT), 'httpPort')
+      : undefined,
     broadcastAddress: result.values['broadcast-address'],
     autoReply: result.values['auto-reply'],
     send: result.values.send,

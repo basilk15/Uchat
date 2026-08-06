@@ -1,6 +1,14 @@
 import type { EncryptedFrame } from '../security/crypto';
+import {
+  isBoundedString,
+  isRecord,
+  isValidTimestamp,
+  parseDiscoveryPeerIdentity,
+  parseJsonPayload,
+  VALIDATION_LIMITS,
+  ValidationError
+} from '@shared/validation';
 import type { DiscoveryPeerIdentity } from '@shared/discovery';
-import type { PresenceStatus } from '@shared/types';
 
 export const TCP_SESSION_APP_ID = 'uchat';
 export const TCP_SESSION_PROTOCOL_VERSION = 1;
@@ -54,6 +62,7 @@ export type TcpSessionControlValidation =
       ok: false;
       reason:
         | 'invalid-json'
+        | 'payload-too-large'
         | 'invalid-shape'
         | 'unsupported-app'
         | 'unsupported-version'
@@ -73,6 +82,7 @@ export type EncryptedSessionEnvelopeValidation =
       ok: false;
       reason:
         | 'invalid-json'
+        | 'payload-too-large'
         | 'invalid-shape'
         | 'unsupported-app'
         | 'unsupported-version'
@@ -81,72 +91,8 @@ export type EncryptedSessionEnvelopeValidation =
         | 'invalid-encrypted-frame';
     };
 
-const presenceStatuses: readonly PresenceStatus[] = ['available', 'away', 'busy'];
-
-const isRecord = (value: unknown): value is Record<string, unknown> =>
-  typeof value === 'object' && value !== null && !Array.isArray(value);
-
-const isNonEmptyString = (value: unknown, maxLength = 256): value is string =>
-  typeof value === 'string' && value.trim().length > 0 && value.length <= maxLength;
-
-const isValidPort = (value: unknown): value is number =>
-  Number.isInteger(value) && Number(value) > 0 && Number(value) <= 65535;
-
-const isValidSentAt = (value: unknown): value is string =>
-  typeof value === 'string' && Number.isFinite(Date.parse(value));
-
-const isValidCapabilities = (value: unknown): value is string[] =>
-  Array.isArray(value) &&
-  value.length <= 20 &&
-  value.every((capability) => isNonEmptyString(capability, 64));
-
 const isSessionMessageType = (value: unknown): value is TcpSessionMessageType =>
   typeof value === 'string' && TCP_SESSION_MESSAGE_TYPES.includes(value as TcpSessionMessageType);
-
-const parseJson = (
-  rawMessage: Uint8Array | string | unknown
-): { ok: true; value: unknown } | { ok: false; reason: 'invalid-json' } => {
-  if (!(rawMessage instanceof Uint8Array) && typeof rawMessage !== 'string') {
-    return { ok: true, value: rawMessage };
-  }
-
-  try {
-    const text = typeof rawMessage === 'string' ? rawMessage : Buffer.from(rawMessage).toString('utf8');
-    return { ok: true, value: JSON.parse(text) };
-  } catch {
-    return { ok: false, reason: 'invalid-json' };
-  }
-};
-
-const validatePeer = (value: unknown): DiscoveryPeerIdentity | null => {
-  if (!isRecord(value)) {
-    return null;
-  }
-
-  if (
-    !isNonEmptyString(value.id, 128) ||
-    !isNonEmptyString(value.displayName, 80) ||
-    !presenceStatuses.includes(value.status as PresenceStatus) ||
-    !isValidPort(value.udpPort) ||
-    !isValidPort(value.tcpPort) ||
-    !isNonEmptyString(value.publicKey, 512) ||
-    !isNonEmptyString(value.roomFingerprint, 128) ||
-    !isValidCapabilities(value.capabilities)
-  ) {
-    return null;
-  }
-
-  return {
-    id: value.id,
-    displayName: value.displayName,
-    status: value.status as PresenceStatus,
-    udpPort: value.udpPort,
-    tcpPort: value.tcpPort,
-    publicKey: value.publicKey,
-    roomFingerprint: value.roomFingerprint,
-    capabilities: value.capabilities
-  };
-};
 
 const validateEncryptedFrame = (value: unknown): EncryptedFrame | null => {
   if (!isRecord(value)) {
@@ -155,9 +101,9 @@ const validateEncryptedFrame = (value: unknown): EncryptedFrame | null => {
 
   if (
     value.algorithm !== 'aes-256-gcm' ||
-    !isNonEmptyString(value.iv, 128) ||
-    !isNonEmptyString(value.ciphertext, 1024 * 1024) ||
-    !isNonEmptyString(value.authTag, 128)
+    !isBoundedString(value.iv, 128) ||
+    !isBoundedString(value.ciphertext, VALIDATION_LIMITS.protocolPayloadBytes) ||
+    !isBoundedString(value.authTag, 128)
   ) {
     return null;
   }
@@ -220,13 +166,26 @@ export const createEncryptedSessionEnvelope = (
 
 export const serializeTcpSessionMessage = (
   message: TcpSessionControlMessage | EncryptedSessionEnvelope
-): Buffer => Buffer.from(JSON.stringify(message));
+): Buffer => {
+  const candidate: unknown = message;
+  const validation =
+    isRecord(candidate) && typeof candidate.type === 'string'
+      ? validateTcpSessionControlMessage(candidate)
+      : validateEncryptedSessionEnvelope(candidate);
+
+  if (!validation.ok) {
+    throw new ValidationError(`Invalid TCP session message: ${validation.reason}.`);
+  }
+
+  const normalized = 'message' in validation ? validation.message : validation.envelope;
+  return Buffer.from(JSON.stringify(normalized));
+};
 
 export const validateTcpSessionControlMessage = (
-  rawMessage: Uint8Array | string | unknown,
+  rawMessage: unknown,
   expectedRoomFingerprint?: string
 ): TcpSessionControlValidation => {
-  const parsed = parseJson(rawMessage);
+  const parsed = parseJsonPayload(rawMessage, VALIDATION_LIMITS.protocolPayloadBytes);
 
   if (!parsed.ok) {
     return parsed;
@@ -248,14 +207,15 @@ export const validateTcpSessionControlMessage = (
     return { ok: false, reason: 'unsupported-type' };
   }
 
-  if (!isValidSentAt(parsed.value.sentAt)) {
+  if (!isValidTimestamp(parsed.value.sentAt)) {
     return { ok: false, reason: 'invalid-shape' };
   }
 
   if (parsed.value.type === 'session.hello') {
-    const peer = validatePeer(parsed.value.peer);
-
-    if (!peer) {
+    let peer: DiscoveryPeerIdentity;
+    try {
+      peer = parseDiscoveryPeerIdentity(parsed.value.peer);
+    } catch {
       return { ok: false, reason: 'invalid-peer' };
     }
 
@@ -276,7 +236,7 @@ export const validateTcpSessionControlMessage = (
   }
 
   if (parsed.value.type === 'session.ready') {
-    if (!isNonEmptyString(parsed.value.peerId, 128)) {
+    if (!isBoundedString(parsed.value.peerId, VALIDATION_LIMITS.identifier)) {
       return { ok: false, reason: 'invalid-ready' };
     }
 
@@ -292,7 +252,10 @@ export const validateTcpSessionControlMessage = (
     };
   }
 
-  if (!isNonEmptyString(parsed.value.code, 80) || !isNonEmptyString(parsed.value.message, 512)) {
+  if (
+    !isBoundedString(parsed.value.code, VALIDATION_LIMITS.sessionErrorCode) ||
+    !isBoundedString(parsed.value.message, VALIDATION_LIMITS.sessionErrorMessage)
+  ) {
     return { ok: false, reason: 'invalid-error' };
   }
 
@@ -310,9 +273,9 @@ export const validateTcpSessionControlMessage = (
 };
 
 export const validateEncryptedSessionEnvelope = (
-  rawMessage: Uint8Array | string | unknown
+  rawMessage: unknown
 ): EncryptedSessionEnvelopeValidation => {
-  const parsed = parseJson(rawMessage);
+  const parsed = parseJsonPayload(rawMessage, VALIDATION_LIMITS.protocolPayloadBytes);
 
   if (!parsed.ok) {
     return parsed;
@@ -334,12 +297,12 @@ export const validateEncryptedSessionEnvelope = (
     return { ok: false, reason: 'not-encrypted-envelope' };
   }
 
-  if (!isNonEmptyString(parsed.value.contentType, 128)) {
+  if (!isBoundedString(parsed.value.contentType, VALIDATION_LIMITS.protocolContentType)) {
     return { ok: false, reason: 'invalid-content-type' };
   }
 
   const frame = validateEncryptedFrame(parsed.value.frame);
-  if (!frame || !isValidSentAt(parsed.value.sentAt)) {
+  if (!frame || !isValidTimestamp(parsed.value.sentAt)) {
     return { ok: false, reason: 'invalid-encrypted-frame' };
   }
 

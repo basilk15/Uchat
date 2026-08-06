@@ -16,6 +16,13 @@ import {
 } from '../security/crypto';
 import { DEFAULT_MAX_TCP_FRAME_BYTES, encodeTcpFrame, TcpFrameDecoder } from './framing';
 import {
+  normalizePort,
+  normalizeText,
+  parseDiscoveryPeerIdentity,
+  VALIDATION_LIMITS,
+  ValidationError
+} from '@shared/validation';
+import {
   createEncryptedSessionEnvelope,
   createSessionErrorMessage,
   createSessionHelloMessage,
@@ -99,9 +106,21 @@ export class TcpSession {
       return Promise.reject(new TcpSessionError('TCP session socket is closed.', 'socket-closed'));
     }
 
-    const body = typeof payload === 'string' ? Buffer.from(payload, 'utf8') : Buffer.from(payload);
-    const encrypted = encryptFrame(this.sessionKey, body, contentType);
-    const envelope = createEncryptedSessionEnvelope(contentType, encrypted);
+    const normalizedContentType = normalizeText(
+      contentType,
+      'contentType',
+      VALIDATION_LIMITS.protocolContentType
+    );
+    const body = toPayloadBuffer(payload);
+    if (body.byteLength > this.maxFrameBytes) {
+      throw new ValidationError(
+        `Encrypted payload must fit within the ${this.maxFrameBytes} byte frame limit.`,
+        'payload'
+      );
+    }
+
+    const encrypted = encryptFrame(this.sessionKey, body, normalizedContentType);
+    const envelope = createEncryptedSessionEnvelope(normalizedContentType, encrypted);
     const wireFrame = encodeTcpFrame(serializeTcpSessionMessage(envelope), this.maxFrameBytes);
 
     return writeSocket(this.socket, wireFrame);
@@ -135,6 +154,18 @@ const writeSocket = (socket: Socket, data: Buffer): Promise<void> =>
     });
   });
 
+const toPayloadBuffer = (payload: unknown): Buffer => {
+  if (typeof payload === 'string') {
+    return Buffer.from(payload, 'utf8');
+  }
+
+  if (payload instanceof Uint8Array) {
+    return Buffer.from(payload);
+  }
+
+  throw new ValidationError('payload must be a string or Uint8Array.', 'payload');
+};
+
 const createSessionId = (localPeerId: string, remotePeerId: string): string =>
   [localPeerId, remotePeerId].sort().join(':');
 
@@ -151,6 +182,7 @@ class TcpSessionConnection {
   private rejectReady: ((error: Error) => void) | null = null;
 
   constructor(private readonly config: TcpConnectionConfig) {
+    parseDiscoveryPeerIdentity(config.local.peer, { allowEphemeralTcpPort: true });
     this.decoder = new TcpFrameDecoder(config.maxFrameBytes);
   }
 
@@ -385,6 +417,11 @@ export class TcpSessionManager {
     config: TcpSessionManagerConfig,
     private readonly events: TcpSessionManagerEvents = {}
   ) {
+    parseDiscoveryPeerIdentity(config.peer, { allowEphemeralTcpPort: true });
+    if (config.tcpPort !== undefined) {
+      normalizePort(config.tcpPort, 'tcpPort', true);
+    }
+
     this.config = {
       ...config,
       handshakeTimeoutMs: config.handshakeTimeoutMs ?? DEFAULT_TCP_HANDSHAKE_TIMEOUT_MS,
@@ -421,15 +458,26 @@ export class TcpSessionManager {
       this.server.once('error', reject);
       this.server.listen(this.config.tcpPort ?? DEFAULT_TCP_PORT, this.config.host, () => {
         this.server?.off('error', reject);
+        if (this.config.peer.tcpPort === 0) {
+          this.config.peer.tcpPort = this.port;
+        }
         resolve(this.port);
       });
     });
   }
 
   connectToPeer(options: TcpConnectOptions): Promise<TcpSession> {
+    const peer = parseDiscoveryPeerIdentity(options.peer);
+    const address = normalizeText(options.address, 'address', VALIDATION_LIMITS.address);
+    const port = normalizePort(options.port ?? peer.tcpPort, 'port');
+    const timeoutMs = options.timeoutMs ?? this.config.handshakeTimeoutMs;
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120_000) {
+      throw new ValidationError('timeoutMs must be an integer from 1 to 120000.', 'timeoutMs');
+    }
+
     const socket = connectSocket({
-      host: options.address,
-      port: options.port ?? options.peer.tcpPort
+      host: address,
+      port
     });
     const connectTimeoutMs = options.timeoutMs ?? this.config.connectTimeoutMs;
 
@@ -470,10 +518,10 @@ export class TcpSessionManager {
           socket,
           role: 'client',
           local: this.config,
-          expectedRemotePeer: options.peer,
+          expectedRemotePeer: peer,
           events: this.wrapEvents(),
           maxFrameBytes: this.config.maxFrameBytes,
-          handshakeTimeoutMs: options.timeoutMs ?? this.config.handshakeTimeoutMs,
+          handshakeTimeoutMs: timeoutMs,
           onClose: (sessionId) => this.sessions.delete(sessionId)
         });
 

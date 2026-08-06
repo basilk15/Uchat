@@ -13,6 +13,7 @@ import {
   createCipheriv,
   createDecipheriv
 } from 'node:crypto';
+import { normalizeText, VALIDATION_LIMITS } from '@shared/validation';
 
 const scrypt = (password: string, salt: Buffer, keylen: number, options: ScryptOptions): Promise<Buffer> =>
   new Promise((resolve, reject) => {
@@ -105,8 +106,20 @@ export const createRoomFingerprint = (roomKey: Buffer, roomName: string): string
 };
 
 export const deriveRoomKey = async (roomName: string, passphrase: string): Promise<DerivedRoomKey> => {
-  const normalizedRoomName = normalizeRoomName(roomName);
-  const key = (await scrypt(passphrase, roomSaltFor(normalizedRoomName), ROOM_KEY_BYTES, ROOM_KEY_SCRYPT_PARAMS)) as Buffer;
+  const validatedRoomName = normalizeText(roomName, 'roomName', VALIDATION_LIMITS.roomName);
+  const validatedPassphrase = normalizeText(
+    passphrase,
+    'passphrase',
+    VALIDATION_LIMITS.passphrase,
+    { trim: false }
+  );
+  const normalizedRoomName = normalizeRoomName(validatedRoomName);
+  const key = (await scrypt(
+    validatedPassphrase,
+    roomSaltFor(normalizedRoomName),
+    ROOM_KEY_BYTES,
+    ROOM_KEY_SCRYPT_PARAMS
+  )) as Buffer;
 
   return {
     roomName: normalizedRoomName,

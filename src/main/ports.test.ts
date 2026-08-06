@@ -67,6 +67,13 @@ afterEach(async () => {
 });
 
 describe('port availability helpers', () => {
+  it('rejects invalid runtime port values before attempting a bind', async () => {
+    await expect(checkTcpPortAvailable(0)).rejects.toThrow('TCP port must be an integer from 1 to 65535.');
+    await expect(checkUdpPortAvailable('47475' as never)).rejects.toThrow(
+      'UDP port must be an integer from 1 to 65535.'
+    );
+  });
+
   it('reports an occupied TCP port as unavailable', async () => {
     const { port } = await listenTcp();
 

@@ -1,6 +1,7 @@
 import { createSocket } from 'node:dgram';
 import { createServer } from 'node:net';
 import { networkInterfaces, type NetworkInterfaceInfo } from 'node:os';
+import { normalizePort } from '@shared/validation';
 
 export type PortProtocol = 'udp' | 'tcp';
 
@@ -45,8 +46,10 @@ const unavailableResult = (
   };
 };
 
-export const checkTcpPortAvailable = (port: number, host?: string): Promise<PortAvailabilityResult> =>
-  new Promise((resolve) => {
+export const checkTcpPortAvailable = async (port: number, host?: string): Promise<PortAvailabilityResult> => {
+  const normalizedPort = normalizePort(port, 'TCP port');
+
+  return new Promise((resolve) => {
     const server = createServer();
     let settled = false;
 
@@ -65,19 +68,22 @@ export const checkTcpPortAvailable = (port: number, host?: string): Promise<Port
       finish(unavailableResult('tcp', port, error));
     });
 
-    server.listen({ port, host }, () => {
+    server.listen({ port: normalizedPort, host }, () => {
       server.close(() => {
         finish({
           protocol: 'tcp',
-          port,
+          port: normalizedPort,
           available: true
         });
       });
     });
   });
+};
 
-export const checkUdpPortAvailable = (port: number, host?: string): Promise<PortAvailabilityResult> =>
-  new Promise((resolve) => {
+export const checkUdpPortAvailable = async (port: number, host?: string): Promise<PortAvailabilityResult> => {
+  const normalizedPort = normalizePort(port, 'UDP port');
+
+  return new Promise((resolve) => {
     const socket = createSocket({ type: 'udp4', reuseAddr: false });
     let settled = false;
 
@@ -96,16 +102,17 @@ export const checkUdpPortAvailable = (port: number, host?: string): Promise<Port
       finish(unavailableResult('udp', port, error));
     });
 
-    socket.bind(port, host, () => {
+    socket.bind(normalizedPort, host, () => {
       socket.close(() => {
         finish({
           protocol: 'udp',
-          port,
+          port: normalizedPort,
           available: true
         });
       });
     });
   });
+};
 
 export const checkConfiguredPortAvailability = async (
   ports: ConfiguredPorts
