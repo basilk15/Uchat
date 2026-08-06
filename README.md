@@ -43,6 +43,13 @@ The app uses UDP broadcast for discovery and TCP for encrypted sessions. Devices
 - `src/renderer` — React desktop UI
 - `src/dev` — LAN peer simulator and HTTP test bridge
 - `scripts` — resilience and load checks
+- `docs/testing` — local LAN and peer-simulator testing
+- `docs/maintainers` — release and MVP hardening checks
+
+## Documentation
+
+- [Local LAN testing](docs/testing/peer-simulator.md)
+- [MVP hardening checklist](docs/maintainers/mvp-hardening-checklist.md)
 
 ## License
 
