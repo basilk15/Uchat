@@ -26,6 +26,7 @@ import {
 } from './protocol';
 
 export const DEFAULT_TCP_HANDSHAKE_TIMEOUT_MS = 5_000;
+export const DEFAULT_TCP_CONNECT_TIMEOUT_MS = 5_000;
 
 export type TcpSessionRole = 'client' | 'server';
 
@@ -58,6 +59,7 @@ export interface TcpSessionManagerConfig extends TcpSessionIdentity {
   host?: string;
   tcpPort?: number;
   handshakeTimeoutMs?: number;
+  connectTimeoutMs?: number;
   maxFrameBytes?: number;
 }
 
@@ -374,7 +376,9 @@ class TcpSessionConnection {
 export class TcpSessionManager {
   private server: Server | null = null;
   private readonly sessions = new Map<string, TcpSession>();
-  private readonly config: Required<Pick<TcpSessionManagerConfig, 'handshakeTimeoutMs' | 'maxFrameBytes'>> &
+  private readonly config: Required<
+    Pick<TcpSessionManagerConfig, 'handshakeTimeoutMs' | 'connectTimeoutMs' | 'maxFrameBytes'>
+  > &
     TcpSessionManagerConfig;
 
   constructor(
@@ -384,6 +388,7 @@ export class TcpSessionManager {
     this.config = {
       ...config,
       handshakeTimeoutMs: config.handshakeTimeoutMs ?? DEFAULT_TCP_HANDSHAKE_TIMEOUT_MS,
+      connectTimeoutMs: config.connectTimeoutMs ?? DEFAULT_TCP_CONNECT_TIMEOUT_MS,
       maxFrameBytes: config.maxFrameBytes ?? DEFAULT_MAX_TCP_FRAME_BYTES
     };
   }
@@ -426,14 +431,39 @@ export class TcpSessionManager {
       host: options.address,
       port: options.port ?? options.peer.tcpPort
     });
+    const connectTimeoutMs = options.timeoutMs ?? this.config.connectTimeoutMs;
 
     return new Promise((resolve, reject) => {
+      let settled = false;
+      let connectTimer: NodeJS.Timeout | null = null;
+
+      const clearConnectTimer = (): void => {
+        if (connectTimer) {
+          clearTimeout(connectTimer);
+          connectTimer = null;
+        }
+      };
+
       const failConnect = (error: Error): void => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        clearConnectTimer();
+        socket.off('connect', handleConnect);
+        socket.off('error', failConnect);
+        socket.destroy();
         reject(error);
       };
 
-      socket.once('error', failConnect);
-      socket.once('connect', () => {
+      const handleConnect = (): void => {
+        if (settled) {
+          return;
+        }
+
+        settled = true;
+        clearConnectTimer();
         socket.off('error', failConnect);
 
         const connection = new TcpSessionConnection({
@@ -448,7 +478,15 @@ export class TcpSessionManager {
         });
 
         connection.start().then(resolve, reject);
-      });
+      };
+
+      socket.once('error', failConnect);
+      socket.once('connect', handleConnect);
+      connectTimer = setTimeout(() => {
+        failConnect(
+          new TcpSessionError(`TCP connection timed out after ${connectTimeoutMs}ms.`, 'connect-timeout')
+        );
+      }, connectTimeoutMs);
     });
   }
 

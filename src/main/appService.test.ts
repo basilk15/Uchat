@@ -146,7 +146,7 @@ const createPeer = (id: string, overrides: Partial<Peer> = {}): Peer => ({
 });
 
 const createHarness = async (
-  overrides: Pick<UchatAppServiceOptions, 'checkConfiguredPorts' | 'getLanInterfaces'> = {},
+  overrides: Pick<UchatAppServiceOptions, 'checkConfiguredPorts' | 'deliveryAckTimeoutMs' | 'getLanInterfaces'> = {},
   seedStorage?: (storage: ReturnType<typeof createSqliteStorage>) => Promise<void>
 ) => {
   const directory = await mkdtemp(join(tmpdir(), 'uchat-app-service-'));
@@ -541,6 +541,43 @@ describe('createUchatAppService discovery integration', () => {
     await service.cleanup();
   });
 
+  it('fails direct messages when the peer stays silent after receiving them', async () => {
+    const { service, storage, discoveryRuntimes, messageEvents } = await createHarness({
+      deliveryAckTimeoutMs: 20
+    });
+
+    await service.joinRoom({ roomName: 'Room', passphrase: 'secret' });
+    const roomFingerprint = discoveryRuntimes[0].config.localPeer.roomFingerprint;
+    discoveryRuntimes[0].emitPeerUpdated(createPeer('peer-a', { roomFingerprint }));
+    await nextTick();
+    await storage.createConversation({
+      id: 'direct-peer-a',
+      kind: 'direct',
+      title: 'Peer A',
+      peerId: 'peer-a'
+    });
+
+    const message = await service.sendMessage({
+      conversationId: 'direct-peer-a',
+      body: 'please acknowledge'
+    });
+
+    expect(message.deliveryState).toBe('sent');
+    await waitFor(async () =>
+      (await storage.listMessages('direct-peer-a')).some(
+        (current) => current.id === message.id && current.deliveryState === 'failed'
+      )
+    );
+    expect(messageEvents).toContainEqual(
+      expect.objectContaining({
+        id: message.id,
+        deliveryState: 'failed'
+      })
+    );
+
+    await service.cleanup();
+  });
+
   it('persists inbound chat messages and sends acknowledgements', async () => {
     const { service, storage, messageEvents, tcpRuntimes } = await createHarness();
 
@@ -599,33 +636,27 @@ describe('createUchatAppService discovery integration', () => {
   });
 
   it('updates local message delivery when chat acknowledgements arrive', async () => {
-    const { service, storage, messageEvents, tcpRuntimes } = await createHarness();
+    const { service, storage, messageEvents, discoveryRuntimes, tcpRuntimes } = await createHarness();
 
     await service.joinRoom({ roomName: 'Room', passphrase: 'secret' });
+    const roomFingerprint = discoveryRuntimes[0].config.localPeer.roomFingerprint;
+    discoveryRuntimes[0].emitPeerUpdated(createPeer('peer-a', { roomFingerprint }));
+    await nextTick();
     await storage.createConversation({
       id: 'direct-peer-a',
       kind: 'direct',
       title: 'Peer A',
       peerId: 'peer-a'
     });
-    const message = await storage.createMessage({
+    const message = await service.sendMessage({
       conversationId: 'direct-peer-a',
-      body: 'hello',
-      author: 'local',
-      deliveryState: 'sent'
+      body: 'hello'
     });
-    const session = await tcpRuntimes[0].connectToPeer({
-      peer: {
-        ...tcpRuntimes[0].config.peer,
-        id: 'peer-a',
-        displayName: 'Peer A',
-        publicKey: 'public-key-peer-a'
-      },
-      address: '127.0.0.1'
-    });
+    const session = tcpRuntimes[0].sessions.find((current) => current.remotePeer.id === 'peer-a');
+    expect(session).toBeDefined();
 
     tcpRuntimes[0].emitEncryptedMessage({
-      session,
+      session: session as TcpSession,
       contentType: CHAT_ACK_CONTENT_TYPE,
       payload: serializeChatFrame(createChatAckFrame(message.id))
     });
@@ -646,6 +677,111 @@ describe('createUchatAppService discovery integration', () => {
         id: message.id,
         deliveryState: 'delivered'
       })
+    );
+
+    await service.cleanup();
+  });
+
+  it('ignores an acknowledgement from the wrong direct recipient and late acknowledgements', async () => {
+    const { service, storage, discoveryRuntimes, messageEvents, tcpRuntimes } = await createHarness({
+      deliveryAckTimeoutMs: 20
+    });
+
+    await service.joinRoom({ roomName: 'Room', passphrase: 'secret' });
+    const roomFingerprint = discoveryRuntimes[0].config.localPeer.roomFingerprint;
+    discoveryRuntimes[0].emitPeerUpdated(createPeer('peer-a', { roomFingerprint }));
+    discoveryRuntimes[0].emitPeerUpdated(createPeer('peer-b', { roomFingerprint }));
+    await nextTick();
+    await storage.createConversation({
+      id: 'direct-peer-a',
+      kind: 'direct',
+      title: 'Peer A',
+      peerId: 'peer-a'
+    });
+
+    const message = await service.sendMessage({
+      conversationId: 'direct-peer-a',
+      body: 'only peer A should confirm this'
+    });
+    const peerASession = tcpRuntimes[0].sessions.find((session) => session.remotePeer.id === 'peer-a');
+    const peerB = createPeer('peer-b', { roomFingerprint });
+    const peerBSession = await tcpRuntimes[0].connectToPeer({
+      peer: {
+        ...peerB,
+        publicKey: peerB.publicKey as string,
+        roomFingerprint: peerB.roomFingerprint as string,
+        capabilities: peerB.capabilities as string[]
+      },
+      address: '127.0.0.1'
+    });
+    expect(peerASession).toBeDefined();
+    expect(peerBSession).toBeDefined();
+
+    tcpRuntimes[0].emitEncryptedMessage({
+      session: peerBSession as TcpSession,
+      contentType: CHAT_ACK_CONTENT_TYPE,
+      payload: serializeChatFrame(createChatAckFrame(message.id))
+    });
+    await nextTick();
+    await expect(storage.listMessages('direct-peer-a')).resolves.toContainEqual(
+      expect.objectContaining({ id: message.id, deliveryState: 'sent' })
+    );
+
+    await waitFor(async () =>
+      (await storage.listMessages('direct-peer-a')).some(
+        (current) => current.id === message.id && current.deliveryState === 'failed'
+      )
+    );
+
+    tcpRuntimes[0].emitEncryptedMessage({
+      session: peerASession as TcpSession,
+      contentType: CHAT_ACK_CONTENT_TYPE,
+      payload: serializeChatFrame(createChatAckFrame(message.id))
+    });
+    await nextTick();
+
+    await expect(storage.listMessages('direct-peer-a')).resolves.toContainEqual(
+      expect.objectContaining({ id: message.id, deliveryState: 'failed' })
+    );
+    expect(messageEvents).not.toContainEqual(
+      expect.objectContaining({ id: message.id, deliveryState: 'delivered' })
+    );
+
+    await service.cleanup();
+  });
+
+  it('fails a broadcast when an expected recipient stays silent', async () => {
+    const { service, storage, discoveryRuntimes, tcpRuntimes } = await createHarness({
+      deliveryAckTimeoutMs: 20
+    });
+
+    await service.joinRoom({ roomName: 'Room', passphrase: 'secret' });
+    const roomFingerprint = discoveryRuntimes[0].config.localPeer.roomFingerprint;
+    discoveryRuntimes[0].emitPeerUpdated(createPeer('peer-a', { roomFingerprint }));
+    discoveryRuntimes[0].emitPeerUpdated(createPeer('peer-b', { roomFingerprint }));
+    await nextTick();
+
+    const message = await service.sendMessage({
+      conversationId: 'broadcast',
+      body: 'both peers must acknowledge'
+    });
+    const peerASession = tcpRuntimes[0].sessions.find((session) => session.remotePeer.id === 'peer-a');
+    expect(peerASession).toBeDefined();
+
+    tcpRuntimes[0].emitEncryptedMessage({
+      session: peerASession as TcpSession,
+      contentType: CHAT_ACK_CONTENT_TYPE,
+      payload: serializeChatFrame(createChatAckFrame(message.id))
+    });
+
+    await waitFor(async () =>
+      (await storage.listMessages('broadcast')).some(
+        (current) => current.id === message.id && current.deliveryState === 'failed'
+      )
+    );
+
+    await expect(storage.listMessages('broadcast')).resolves.toContainEqual(
+      expect.objectContaining({ id: message.id, deliveryState: 'failed' })
     );
 
     await service.cleanup();

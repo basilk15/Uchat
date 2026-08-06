@@ -85,6 +85,7 @@ export interface UchatAppServiceOptions {
   createTcpSessionManager?: TcpSessionManagerFactory;
   checkConfiguredPorts?: (ports: ConfiguredPorts) => Promise<ConfiguredPortAvailability>;
   getLanInterfaces?: () => LanInterfaceSummary[];
+  deliveryAckTimeoutMs?: number;
   onPeerUpdated?: (peer: Peer) => void;
   onPeerRemoved?: (peerId: string) => void;
   onMessageReceived?: (message: ChatMessage) => void;
@@ -92,10 +93,13 @@ export interface UchatAppServiceOptions {
 
 const DIRECT_CONVERSATION_PREFIX = 'direct-';
 const CHAT_CAPABILITIES = ['discovery', 'tcp-session', 'chat'];
+export const DEFAULT_CHAT_ACK_TIMEOUT_MS = 5_000;
 
-interface PendingBroadcastAcks {
+interface PendingDeliveryAcks {
   expectedPeerIds: Set<string>;
   acknowledgedPeerIds: Set<string>;
+  sendCompletedPeerIds: Set<string>;
+  timer: NodeJS.Timeout | null;
 }
 
 const defaultCreateDiscoveryService: DiscoveryServiceFactory = (config, events) =>
@@ -161,10 +165,15 @@ export const createUchatAppService = (
   const createTcpSessionManager = options.createTcpSessionManager ?? defaultCreateTcpSessionManager;
   const checkConfiguredPorts = options.checkConfiguredPorts ?? checkConfiguredPortAvailability;
   const getLanInterfaces = options.getLanInterfaces ?? getUsableLanInterfaces;
+  const deliveryAckTimeoutMs =
+    options.deliveryAckTimeoutMs && Number.isFinite(options.deliveryAckTimeoutMs) && options.deliveryAckTimeoutMs > 0
+      ? options.deliveryAckTimeoutMs
+      : DEFAULT_CHAT_ACK_TIMEOUT_MS;
   let discoveryService: DiscoveryRuntime | null = null;
   let tcpSessionManager: TcpSessionRuntime | null = null;
   let activeLocalPeer: DiscoveryPeerIdentity | null = null;
-  const pendingBroadcastAcks = new Map<string, PendingBroadcastAcks>();
+  const pendingDirectAcks = new Map<string, PendingDeliveryAcks>();
+  const pendingBroadcastAcks = new Map<string, PendingDeliveryAcks>();
 
   const recordNetworkEvent = async (
     message: string,
@@ -225,6 +234,8 @@ export const createUchatAppService = (
   };
 
   const stopTcpSessions = async (): Promise<void> => {
+    await failPendingDeliveries('TCP sessions stopped before delivery was acknowledged.');
+
     if (!tcpSessionManager) {
       return;
     }
@@ -336,6 +347,95 @@ export const createUchatAppService = (
       const message = error instanceof Error ? error.message : 'Unknown delivery state error.';
       await recordNetworkEvent(`Failed to update message delivery state: ${message}`, 'warning');
       return null;
+    }
+  };
+
+  const findPendingDelivery = (
+    messageId: string
+  ): { pending: PendingDeliveryAcks; map: Map<string, PendingDeliveryAcks> } | null => {
+    const direct = pendingDirectAcks.get(messageId);
+    if (direct) {
+      return { pending: direct, map: pendingDirectAcks };
+    }
+
+    const broadcast = pendingBroadcastAcks.get(messageId);
+    return broadcast ? { pending: broadcast, map: pendingBroadcastAcks } : null;
+  };
+
+  const removePendingDelivery = (
+    messageId: string,
+    expectedPending?: PendingDeliveryAcks
+  ): PendingDeliveryAcks | null => {
+    const pending = findPendingDelivery(messageId);
+    if (!pending || (expectedPending && pending.pending !== expectedPending)) {
+      return null;
+    }
+
+    pending.map.delete(messageId);
+    if (pending.pending.timer) {
+      clearTimeout(pending.pending.timer);
+      pending.pending.timer = null;
+    }
+    return pending.pending;
+  };
+
+  const markFailed = async (messageId: string, reason: string): Promise<void> => {
+    const failed = await updateDeliveryState(messageId, 'failed', false);
+    if (failed) {
+      options.onMessageReceived?.(failed);
+    }
+    await recordNetworkEvent(reason, 'warning');
+  };
+
+  const failPendingDelivery = async (
+    messageId: string,
+    pending: PendingDeliveryAcks,
+    reason: string
+  ): Promise<void> => {
+    if (!removePendingDelivery(messageId, pending)) {
+      return;
+    }
+
+    await markFailed(messageId, reason);
+  };
+
+  const startDeliveryAckTimeout = (messageId: string, pending: PendingDeliveryAcks): void => {
+    if (pending.timer) {
+      return;
+    }
+
+    pending.timer = setTimeout(() => {
+      void failPendingDelivery(
+        messageId,
+        pending,
+        `Message ${messageId} failed because delivery was not acknowledged within ${deliveryAckTimeoutMs}ms.`
+      );
+    }, deliveryAckTimeoutMs);
+  };
+
+  const completePendingDelivery = async (messageId: string, pending: PendingDeliveryAcks): Promise<void> => {
+    const active = findPendingDelivery(messageId);
+    if (
+      !active ||
+      active.pending !== pending ||
+      pending.acknowledgedPeerIds.size !== pending.expectedPeerIds.size ||
+      pending.sendCompletedPeerIds.size !== pending.expectedPeerIds.size
+    ) {
+      return;
+    }
+
+    removePendingDelivery(messageId, pending);
+    await markAcknowledged(messageId);
+  };
+
+  const failPendingDeliveries = async (reason: string): Promise<void> => {
+    const pendingEntries = [
+      ...Array.from(pendingDirectAcks.entries()),
+      ...Array.from(pendingBroadcastAcks.entries())
+    ];
+
+    for (const [messageId, pending] of pendingEntries) {
+      await failPendingDelivery(messageId, pending, `Message ${messageId} failed. ${reason}`);
     }
   };
 
@@ -462,31 +562,26 @@ export const createUchatAppService = (
       return;
     }
 
-    const pendingBroadcast = pendingBroadcastAcks.get(validation.frame.messageId);
-    if (pendingBroadcast) {
-      if (pendingBroadcast.expectedPeerIds.has(message.session.remotePeer.id)) {
-        pendingBroadcast.acknowledgedPeerIds.add(message.session.remotePeer.id);
-      }
-
-      if (pendingBroadcast.acknowledgedPeerIds.size < pendingBroadcast.expectedPeerIds.size) {
-        return;
-      }
-
-      pendingBroadcastAcks.delete(validation.frame.messageId);
-      await markAcknowledged(validation.frame.messageId);
-      return;
-    }
-
-    const stored = await findStoredMessageConversation(validation.frame.messageId);
-    if (stored?.conversation.kind === 'broadcast') {
+    const pendingDelivery = findPendingDelivery(validation.frame.messageId);
+    if (!pendingDelivery) {
       await recordNetworkEvent(
-        `Ignored broadcast acknowledgement for ${validation.frame.messageId} because recipient tracking is not active.`,
+        `Ignored chat acknowledgement for ${validation.frame.messageId} because no delivery is pending.`,
         'warning'
       );
       return;
     }
 
-    await markAcknowledged(validation.frame.messageId);
+    const remotePeerId = message.session.remotePeer.id;
+    if (!pendingDelivery.pending.expectedPeerIds.has(remotePeerId)) {
+      await recordNetworkEvent(
+        `Ignored chat acknowledgement for ${validation.frame.messageId} from unexpected peer ${remotePeerId}.`,
+        'warning'
+      );
+      return;
+    }
+
+    pendingDelivery.pending.acknowledgedPeerIds.add(remotePeerId);
+    await completePendingDelivery(validation.frame.messageId, pendingDelivery.pending);
   };
 
   const handleEncryptedMessage = async (message: TcpEncryptedMessage): Promise<void> => {
@@ -684,7 +779,9 @@ export const createUchatAppService = (
 
           pendingBroadcastAcks.set(message.id, {
             expectedPeerIds: new Set(peers.map((peer) => peer.id)),
-            acknowledgedPeerIds: new Set()
+            acknowledgedPeerIds: new Set(),
+            sendCompletedPeerIds: new Set(),
+            timer: null
           });
 
           const deliveries = await Promise.allSettled(
@@ -693,14 +790,14 @@ export const createUchatAppService = (
           const deliveredCount = deliveries.filter((delivery) => delivery.status === 'fulfilled').length;
 
           if (deliveredCount === 0) {
-            pendingBroadcastAcks.delete(message.id);
+            removePendingDelivery(message.id);
             const failed = await updateDeliveryState(message.id, 'failed');
             await recordNetworkEvent('Broadcast message failed for all online peers.', 'error');
             return failed ?? message;
           }
 
           if (deliveredCount < peers.length) {
-            pendingBroadcastAcks.delete(message.id);
+            removePendingDelivery(message.id);
             const failed = await updateDeliveryState(message.id, 'failed');
             await recordNetworkEvent(
               `Broadcast message only reached ${deliveredCount}/${peers.length} online peers; full delivery is not guaranteed.`,
@@ -711,13 +808,17 @@ export const createUchatAppService = (
 
           const sent = await updateDeliveryState(message.id, 'sent');
           const pending = pendingBroadcastAcks.get(message.id);
-          if (pending && pending.acknowledgedPeerIds.size === pending.expectedPeerIds.size) {
-            pendingBroadcastAcks.delete(message.id);
-            return (await markAcknowledged(message.id)) ?? sent ?? message;
+          if (pending) {
+            for (const peer of peers) {
+              pending.sendCompletedPeerIds.add(peer.id);
+            }
+            startDeliveryAckTimeout(message.id, pending);
+            await completePendingDelivery(message.id, pending);
           }
 
+          const current = await findStoredMessageConversation(message.id);
           await recordNetworkEvent(`Broadcast message sent to ${deliveredCount}/${peers.length} online peers.`);
-          return sent ?? message;
+          return current?.message ?? sent ?? message;
         }
 
         if (!conversation.peerId) {
@@ -733,9 +834,18 @@ export const createUchatAppService = (
           return unsent ?? message;
         }
 
+        const pendingDirect: PendingDeliveryAcks = {
+          expectedPeerIds: new Set([peer.id]),
+          acknowledgedPeerIds: new Set(),
+          sendCompletedPeerIds: new Set(),
+          timer: null
+        };
+        pendingDirectAcks.set(message.id, pendingDirect);
+
         try {
           await sendChatMessageToPeer(peer, message, 'direct');
         } catch (error) {
+          removePendingDelivery(message.id, pendingDirect);
           const failed = await updateDeliveryState(message.id, 'failed');
           const errorMessage = error instanceof Error ? error.message : 'Unknown TCP send error.';
           await recordNetworkEvent(`Failed to send direct message to ${peer.displayName}: ${errorMessage}`, 'error');
@@ -743,8 +853,16 @@ export const createUchatAppService = (
         }
 
         const sent = await updateDeliveryState(message.id, 'sent');
+        const pending = pendingDirectAcks.get(message.id);
+        if (pending) {
+          pending.sendCompletedPeerIds.add(peer.id);
+          startDeliveryAckTimeout(message.id, pending);
+          await completePendingDelivery(message.id, pending);
+        }
+
+        const current = await findStoredMessageConversation(message.id);
         await recordNetworkEvent(`Direct message sent to ${peer.displayName}.`);
-        return sent ?? message;
+        return current?.message ?? sent ?? message;
       });
     },
 
@@ -753,7 +871,6 @@ export const createUchatAppService = (
         await stopDiscovery();
         await stopTcpSessions();
         activeLocalPeer = null;
-        pendingBroadcastAcks.clear();
         await storage.close();
       });
     }
