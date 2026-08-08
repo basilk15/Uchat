@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { DEFAULT_DISCOVERY_PORT, DEFAULT_TCP_PORT } from '@shared/defaults';
 import { createCopyableUfwAllowScript, createUfwAllowCommands } from '@shared/firewall';
@@ -150,6 +150,71 @@ const isReliabilityEvent = (event: NetworkEvent): boolean => {
   );
 };
 
+const DEFAULT_LEFT_PANE_WIDTH = 280;
+const DEFAULT_RIGHT_PANE_WIDTH = 330;
+const MIN_LEFT_PANE_WIDTH = 220;
+const MAX_LEFT_PANE_WIDTH = 420;
+const MIN_RIGHT_PANE_WIDTH = 260;
+const MAX_RIGHT_PANE_WIDTH = 460;
+const MIN_CENTER_PANE_WIDTH = 420;
+const RESIZE_HANDLE_WIDTH = 10;
+const RESIZE_STEP = 16;
+
+type ResizeSide = 'left' | 'right';
+
+interface ResizeState {
+  side: ResizeSide;
+  startX: number;
+  startWidth: number;
+}
+
+interface PaneResizeHandleProps {
+  side: ResizeSide;
+  value: number;
+  min: number;
+  max: number;
+  onPointerDown: (event: React.PointerEvent<HTMLDivElement>, side: ResizeSide) => void;
+  onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>, side: ResizeSide) => void;
+}
+
+const PaneResizeHandle = ({
+  side,
+  value,
+  min,
+  max,
+  onPointerDown,
+  onKeyDown
+}: PaneResizeHandleProps): React.JSX.Element => (
+  <div
+    className={`pane-resize-handle ${side}`}
+    role="separator"
+    tabIndex={0}
+    aria-label={`Resize ${side} sidebar`}
+    aria-orientation="vertical"
+    aria-valuemin={min}
+    aria-valuemax={max}
+    aria-valuenow={value}
+    onPointerDown={(event) => onPointerDown(event, side)}
+    onKeyDown={(event) => onKeyDown(event, side)}
+  />
+);
+
+const getViewportWidth = (): number =>
+  typeof window === 'undefined' || window.innerWidth <= 0 ? 1366 : window.innerWidth;
+
+const clampPaneWidth = (
+  side: ResizeSide,
+  width: number,
+  otherPaneWidth: number,
+  viewportWidth = getViewportWidth()
+): number => {
+  const min = side === 'left' ? MIN_LEFT_PANE_WIDTH : MIN_RIGHT_PANE_WIDTH;
+  const max = side === 'left' ? MAX_LEFT_PANE_WIDTH : MAX_RIGHT_PANE_WIDTH;
+  const maxForCenter = viewportWidth - otherPaneWidth - MIN_CENTER_PANE_WIDTH - RESIZE_HANDLE_WIDTH * 2;
+
+  return Math.round(Math.min(max, Math.max(min, Math.min(width, maxForCenter))));
+};
+
 export const App = (): React.JSX.Element => {
   const [state, setState] = useState<UchatAppState | null>(null);
   const [events, setEvents] = useState<NetworkEvent[]>([]);
@@ -163,11 +228,88 @@ export const App = (): React.JSX.Element => {
   const [udpPortDraft, setUdpPortDraft] = useState(DEFAULT_PORT_DRAFT.udpPort);
   const [tcpPortDraft, setTcpPortDraft] = useState(DEFAULT_PORT_DRAFT.tcpPort);
   const [portErrors, setPortErrors] = useState<PortDraftErrors>({});
+  const [leftPaneWidth, setLeftPaneWidth] = useState(() =>
+    getViewportWidth() <= 1180 ? 250 : DEFAULT_LEFT_PANE_WIDTH
+  );
+  const [rightPaneWidth, setRightPaneWidth] = useState(() =>
+    getViewportWidth() <= 1180 ? 280 : DEFAULT_RIGHT_PANE_WIDTH
+  );
   const [sendState, setSendState] = useState('Ready');
   const [copyState, setCopyState] = useState('Copy');
   const [roomState, setRoomState] = useState('Local only');
   const [bootIssue, setBootIssue] = useState<string | null>(null);
   const [passphraseSubmitted, setPassphraseSubmitted] = useState(false);
+  const resizeRef = useRef<ResizeState | null>(null);
+
+  useEffect(() => {
+    const handlePointerMove = (event: PointerEvent): void => {
+      const resize = resizeRef.current;
+      if (!resize) {
+        return;
+      }
+
+      const delta = event.clientX - resize.startX;
+      if (resize.side === 'left') {
+        setLeftPaneWidth(
+          clampPaneWidth('left', resize.startWidth + delta, rightPaneWidth)
+        );
+      } else {
+        setRightPaneWidth(
+          clampPaneWidth('right', resize.startWidth - delta, leftPaneWidth)
+        );
+      }
+    };
+
+    const stopResize = (): void => {
+      resizeRef.current = null;
+      document.body.classList.remove('is-resizing');
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResize);
+    window.addEventListener('pointercancel', stopResize);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResize);
+      window.removeEventListener('pointercancel', stopResize);
+      document.body.classList.remove('is-resizing');
+    };
+  }, [leftPaneWidth, rightPaneWidth]);
+
+  const handleResizePointerDown = (
+    event: React.PointerEvent<HTMLDivElement>,
+    side: ResizeSide
+  ): void => {
+    event.preventDefault();
+    resizeRef.current = {
+      side,
+      startX: event.clientX,
+      startWidth: side === 'left' ? leftPaneWidth : rightPaneWidth
+    };
+    document.body.classList.add('is-resizing');
+  };
+
+  const handleResizeKeyDown = (
+    event: React.KeyboardEvent<HTMLDivElement>,
+    side: ResizeSide
+  ): void => {
+    const direction = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
+    if (!direction) {
+      return;
+    }
+
+    event.preventDefault();
+    if (side === 'left') {
+      setLeftPaneWidth((current) =>
+        clampPaneWidth('left', current + direction * RESIZE_STEP, rightPaneWidth)
+      );
+    } else {
+      setRightPaneWidth((current) =>
+        clampPaneWidth('right', current - direction * RESIZE_STEP, leftPaneWidth)
+      );
+    }
+  };
 
   useEffect(() => {
     let mounted = true;
@@ -430,8 +572,13 @@ export const App = (): React.JSX.Element => {
     }
   };
 
+  const shellStyle = {
+    '--left-pane-width': `${leftPaneWidth}px`,
+    '--right-pane-width': `${rightPaneWidth}px`
+  } as React.CSSProperties;
+
   return (
-    <main className="uchat-shell">
+    <main className="uchat-shell" style={shellStyle}>
       {bootIssue ? (
         <section className="boot-banner" role="status" aria-live="polite">
           <strong>Renderer fallback active</strong>
@@ -439,7 +586,7 @@ export const App = (): React.JSX.Element => {
         </section>
       ) : null}
 
-      <aside className="pane left-pane" aria-label="Uchat navigation">
+      <aside id="left-pane" className="pane left-pane" aria-label="Uchat navigation">
         <header className="app-brand">
           <div className="brand-mark" aria-hidden="true">
             U
@@ -605,6 +752,15 @@ export const App = (): React.JSX.Element => {
         </nav>
       </aside>
 
+      <PaneResizeHandle
+        side="left"
+        value={leftPaneWidth}
+        min={MIN_LEFT_PANE_WIDTH}
+        max={MAX_LEFT_PANE_WIDTH}
+        onPointerDown={handleResizePointerDown}
+        onKeyDown={handleResizeKeyDown}
+      />
+
       <section className="pane chat-pane" aria-label="Active conversation">
         <header className="chat-header">
           <div className="avatar" aria-hidden="true">
@@ -663,7 +819,16 @@ export const App = (): React.JSX.Element => {
         </form>
       </section>
 
-      <aside className="pane right-pane" aria-label="Network and peer details">
+      <PaneResizeHandle
+        side="right"
+        value={rightPaneWidth}
+        min={MIN_RIGHT_PANE_WIDTH}
+        max={MAX_RIGHT_PANE_WIDTH}
+        onPointerDown={handleResizePointerDown}
+        onKeyDown={handleResizeKeyDown}
+      />
+
+      <aside id="right-pane" className="pane right-pane" aria-label="Network and peer details">
         <section className="detail-section peer-summary">
           <div className="section-heading">
             <span>{selectedPeer ? 'Peer details' : directConversationOffline ? 'Direct conversation' : 'Room details'}</span>
