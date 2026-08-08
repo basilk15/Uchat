@@ -1,6 +1,17 @@
 import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
+import { DEFAULT_DISCOVERY_PORT, DEFAULT_TCP_PORT } from '@shared/defaults';
 import { createCopyableUfwAllowScript, createUfwAllowCommands } from '@shared/firewall';
+import { MAX_PORT, MIN_PORT } from '@shared/validation';
+import {
+  DEFAULT_PORT_DRAFT,
+  PORT_FIELD_LABELS,
+  PORT_RANGE_HELPER,
+  type PortDraftErrors,
+  type PortField,
+  validatePortDraft,
+  validatePortDrafts
+} from './portSettings';
 import type {
   ChatMessage,
   Conversation,
@@ -149,6 +160,9 @@ export const App = (): React.JSX.Element => {
   const [statusDraft, setStatusDraft] = useState<PresenceStatus>('available');
   const [roomDraft, setRoomDraft] = useState('Local room');
   const [passphraseDraft, setPassphraseDraft] = useState('');
+  const [udpPortDraft, setUdpPortDraft] = useState(DEFAULT_PORT_DRAFT.udpPort);
+  const [tcpPortDraft, setTcpPortDraft] = useState(DEFAULT_PORT_DRAFT.tcpPort);
+  const [portErrors, setPortErrors] = useState<PortDraftErrors>({});
   const [sendState, setSendState] = useState('Ready');
   const [copyState, setCopyState] = useState('Copy');
   const [roomState, setRoomState] = useState('Local only');
@@ -182,6 +196,9 @@ export const App = (): React.JSX.Element => {
         setStatusDraft(appState.profile.status);
         setRoomDraft(appState.room.roomName ?? 'Local room');
         setPassphraseDraft('');
+        setUdpPortDraft(String(appState.room.udpPort));
+        setTcpPortDraft(String(appState.room.tcpPort));
+        setPortErrors({});
         setPassphraseSubmitted(false);
         setRoomState(appState.room.joined ? 'Room joined' : 'Local only');
         setBootIssue(null);
@@ -258,8 +275,8 @@ export const App = (): React.JSX.Element => {
   );
 
   const ports = {
-    udpPort: state?.room.udpPort ?? 47475,
-    tcpPort: state?.room.tcpPort ?? 47476
+    udpPort: state?.room.udpPort ?? DEFAULT_DISCOVERY_PORT,
+    tcpPort: state?.room.tcpPort ?? DEFAULT_TCP_PORT
   };
   const roomJoined = state?.room.joined ?? false;
   const ufwCommands = useMemo(() => createUfwAllowCommands(ports), [ports.tcpPort, ports.udpPort]);
@@ -306,6 +323,15 @@ export const App = (): React.JSX.Element => {
 
     setRoomState('Checking ports');
 
+    const portValidation = validatePortDrafts({ udpPort: udpPortDraft, tcpPort: tcpPortDraft });
+    setPortErrors(portValidation.errors);
+
+    if (!portValidation.values) {
+      setRoomState('Check port settings');
+      setBootIssue('Choose a valid UDP and TCP port before joining.');
+      return;
+    }
+
     if (!passphraseDraft.trim()) {
       setRoomState('Passphrase required');
       setPassphraseSubmitted(false);
@@ -323,12 +349,15 @@ export const App = (): React.JSX.Element => {
       const nextState = await window.uchat.joinRoom({
         roomName: roomDraft,
         passphrase: passphraseDraft,
-        udpPort: ports.udpPort,
-        tcpPort: ports.tcpPort
+        udpPort: portValidation.values.udpPort,
+        tcpPort: portValidation.values.tcpPort
       });
 
       setState(nextState);
       setEvents(nextState.networkEvents);
+      setUdpPortDraft(String(nextState.room.udpPort));
+      setTcpPortDraft(String(nextState.room.tcpPort));
+      setPortErrors({});
       setRoomState('Room joined');
       setPassphraseSubmitted(true);
       setActiveConversationId('broadcast');
@@ -337,6 +366,26 @@ export const App = (): React.JSX.Element => {
       setRoomState('Join failed');
       setBootIssue(`Could not join room: ${formatUnknownError(error)}`);
     }
+  };
+
+  const handlePortChange = (field: PortField, value: string): void => {
+    if (field === 'udpPort') {
+      setUdpPortDraft(value);
+    } else {
+      setTcpPortDraft(value);
+    }
+
+    if (portErrors[field]) {
+      setPortErrors((current) => ({ ...current, [field]: undefined }));
+    }
+  };
+
+  const handlePortBlur = (field: PortField, value: string): void => {
+    const validation = validatePortDraft(value, field);
+    setPortErrors((current) => ({
+      ...current,
+      [field]: validation.error
+    }));
   };
 
   const handleSend = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
@@ -433,7 +482,7 @@ export const App = (): React.JSX.Element => {
           </button>
         </form>
 
-        <form className="room-card" onSubmit={handleJoinRoom}>
+        <form className="room-card" onSubmit={handleJoinRoom} noValidate>
           <div className="section-heading">
             <span>LAN status</span>
             <strong>{roomState}</strong>
@@ -453,6 +502,52 @@ export const App = (): React.JSX.Element => {
             />
             <span className="field-note">Not stored. Re-enter to reconnect after restart.</span>
           </label>
+          <fieldset className="port-settings" aria-describedby="port-settings-help">
+            <legend>Network ports</legend>
+            <span className="field-note" id="port-settings-help">
+              Choose alternate ports if the defaults are already in use. Firewall commands update after a successful join.
+            </span>
+            <div className="port-input-grid">
+              {(['udpPort', 'tcpPort'] as const).map((field) => {
+                const isUdp = field === 'udpPort';
+                const inputId = isUdp ? 'udp-port' : 'tcp-port';
+                const helperId = `${inputId}-help`;
+                const errorId = `${inputId}-error`;
+                const error = portErrors[field];
+                const label = PORT_FIELD_LABELS[field];
+                const value = isUdp ? udpPortDraft : tcpPortDraft;
+                const defaultPort = isUdp ? DEFAULT_DISCOVERY_PORT : DEFAULT_TCP_PORT;
+
+                return (
+                  <label htmlFor={inputId} key={field}>
+                    {label}
+                    <input
+                      id={inputId}
+                      type="number"
+                      inputMode="numeric"
+                      min={MIN_PORT}
+                      max={MAX_PORT}
+                      step={1}
+                      required
+                      value={value}
+                      aria-describedby={error ? `${helperId} ${errorId}` : helperId}
+                      aria-invalid={error ? 'true' : undefined}
+                      onBlur={(event) => handlePortBlur(field, event.target.value)}
+                      onChange={(event) => handlePortChange(field, event.target.value)}
+                    />
+                    <span className="field-note" id={helperId}>
+                      Default: {defaultPort.toLocaleString()} · {PORT_RANGE_HELPER}
+                    </span>
+                    {error ? (
+                      <span className="field-error" id={errorId} role="alert">
+                        {error}
+                      </span>
+                    ) : null}
+                  </label>
+                );
+              })}
+            </div>
+          </fieldset>
           <button type="submit">{roomJoined ? 'Reconnect room' : 'Join local room'}</button>
         </form>
 

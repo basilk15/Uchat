@@ -61,6 +61,7 @@ export interface UchatAppService {
 export interface DiscoveryRuntime {
   start(): Promise<void>;
   stop(): Promise<void>;
+  updateLocalPeer(localPeer: DiscoveryPeerIdentity): Promise<void>;
   listPeers(): Peer[];
 }
 
@@ -69,6 +70,12 @@ export interface TcpSessionRuntime {
   stop(): Promise<void>;
   connectToPeer(options: TcpConnectOptions): Promise<TcpSession>;
   listSessions(): TcpSession[];
+}
+
+interface RuntimeSnapshot {
+  discoveryService: DiscoveryRuntime | null;
+  tcpSessionManager: TcpSessionRuntime | null;
+  activeLocalPeer: DiscoveryPeerIdentity | null;
 }
 
 export type DiscoveryServiceFactory = (
@@ -224,6 +231,31 @@ export const createUchatAppService = (
     };
   };
 
+  const updateActiveLocalPeer = async (profile: LocalProfile): Promise<void> => {
+    if (!activeLocalPeer) {
+      return;
+    }
+
+    const nextLocalPeer = {
+      ...activeLocalPeer,
+      displayName: profile.displayName,
+      status: profile.status
+    };
+    activeLocalPeer = nextLocalPeer;
+
+    const currentDiscoveryService = discoveryService;
+    if (!currentDiscoveryService) {
+      return;
+    }
+
+    try {
+      await currentDiscoveryService.updateLocalPeer(nextLocalPeer);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown discovery update error.';
+      await recordNetworkEvent(`Failed to broadcast updated profile: ${message}`, 'warning');
+    }
+  };
+
   const stopDiscovery = async (): Promise<void> => {
     if (!discoveryService) {
       return;
@@ -246,7 +278,42 @@ export const createUchatAppService = (
     await currentTcpSessionManager.stop();
   };
 
-  const checkRoomNetworking = async (ports: ConfiguredPorts): Promise<void> => {
+  const detachRuntime = (): RuntimeSnapshot => {
+    const snapshot = {
+      discoveryService,
+      tcpSessionManager,
+      activeLocalPeer
+    };
+    discoveryService = null;
+    tcpSessionManager = null;
+    activeLocalPeer = null;
+    return snapshot;
+  };
+
+  const stopRuntimeServices = async (runtime: RuntimeSnapshot): Promise<void> => {
+    let firstError: unknown;
+
+    for (const service of [runtime.discoveryService, runtime.tcpSessionManager]) {
+      if (!service) {
+        continue;
+      }
+
+      try {
+        await service.stop();
+      } catch (error) {
+        firstError ??= error;
+      }
+    }
+
+    if (firstError) {
+      throw firstError;
+    }
+  };
+
+  const checkRoomNetworking = async (
+    ports: ConfiguredPorts,
+    persistedRoom: UchatAppState['room']
+  ): Promise<void> => {
     const lanInterfaces = getLanInterfaces();
     if (lanInterfaces.length === 0) {
       await recordNetworkEvent(
@@ -256,7 +323,14 @@ export const createUchatAppService = (
     }
 
     const portStatus = await checkConfiguredPorts(ports);
-    const failures = [portStatus.udp, portStatus.tcp].filter((result) => !result.available);
+    const currentRuntimeOwnsPort = (protocol: PortProtocol, port: number): boolean =>
+      persistedRoom.joined &&
+      discoveryService !== null &&
+      tcpSessionManager !== null &&
+      (protocol === 'udp' ? persistedRoom.udpPort : persistedRoom.tcpPort) === port;
+    const failures = [portStatus.udp, portStatus.tcp].filter(
+      (result) => !result.available && !currentRuntimeOwnsPort(result.protocol, result.port)
+    );
 
     if (failures.length === 0) {
       await recordNetworkEvent(`Port check passed for UDP ${ports.udpPort} and TCP ${ports.tcpPort}.`);
@@ -440,6 +514,35 @@ export const createUchatAppService = (
     }
   };
 
+  const restoreRuntime = async (runtime: RuntimeSnapshot): Promise<unknown | null> => {
+    try {
+      if (runtime.tcpSessionManager) {
+        await runtime.tcpSessionManager.start();
+      }
+
+      if (runtime.discoveryService) {
+        await runtime.discoveryService.start();
+      }
+
+      tcpSessionManager = runtime.tcpSessionManager;
+      discoveryService = runtime.discoveryService;
+      activeLocalPeer = runtime.activeLocalPeer;
+      return null;
+    } catch (error) {
+      try {
+        await stopRuntimeServices(runtime);
+      } catch {
+        // Preserve the original startup error. The runtime stays detached if
+        // cleanup of the failed restore also fails.
+      }
+
+      tcpSessionManager = null;
+      discoveryService = null;
+      activeLocalPeer = null;
+      return error;
+    }
+  };
+
   const findStoredMessageConversation = async (
     messageId: string
   ): Promise<{ message: ChatMessage; conversation: Conversation } | null> => {
@@ -611,6 +714,7 @@ export const createUchatAppService = (
       const normalizedInput = parseSetProfileInput(input);
       return afterStartup(async () => {
         const profile = await storage.setProfile(normalizedInput);
+        await updateActiveLocalPeer(profile);
         await recordNetworkEvent(`Profile set to ${profile.displayName}.`);
         return profile;
       });
@@ -622,8 +726,14 @@ export const createUchatAppService = (
         const roomName = normalizedInput.roomName;
         const udpPort = normalizedInput.udpPort ?? DEFAULT_DISCOVERY_PORT;
         const tcpPort = normalizedInput.tcpPort ?? DEFAULT_TCP_PORT;
-        const [state, roomKey, identity] = await Promise.all([
-          storage.getAppState(),
+        const state = await storage.getAppState();
+
+        // Validate candidate ports while the current room is still running.
+        // A listener owned by that current room is safe to reuse during a
+        // replacement; other unavailable ports must fail before teardown.
+        await checkRoomNetworking({ udpPort, tcpPort }, state.room);
+
+        const [roomKey, identity] = await Promise.all([
           deriveRoomKey(roomName, normalizedInput.passphrase),
           Promise.resolve(generateX25519Identity())
         ]);
@@ -636,17 +746,6 @@ export const createUchatAppService = (
           udpPort,
           tcpPort,
           capabilities: CHAT_CAPABILITIES
-        });
-
-        await stopDiscovery();
-        await stopTcpSessions();
-        activeLocalPeer = null;
-        await checkRoomNetworking({ udpPort, tcpPort });
-        await storage.setRoom({
-          roomName,
-          joined: true,
-          udpPort,
-          tcpPort
         });
 
         const nextTcpSessionManager = createTcpSessionManager(
@@ -695,55 +794,90 @@ export const createUchatAppService = (
           }
         );
 
-        activeLocalPeer = localPeer;
-        tcpSessionManager = nextTcpSessionManager;
-        discoveryService = nextDiscoveryService;
+        const previousRuntime: RuntimeSnapshot = {
+          discoveryService,
+          tcpSessionManager,
+          activeLocalPeer
+        };
+        let startupPhase: 'stopping' | 'tcp' | 'udp' | 'persisting' | 'ready' = 'stopping';
 
         try {
-          await tcpSessionManager.start();
+          detachRuntime();
+          await stopRuntimeServices(previousRuntime);
+
+          startupPhase = 'tcp';
+          await nextTcpSessionManager.start();
+          startupPhase = 'udp';
+          await nextDiscoveryService.start();
+
+          startupPhase = 'persisting';
+          await storage.setRoom({
+            roomName,
+            joined: true,
+            udpPort,
+            tcpPort
+          });
+
+          tcpSessionManager = nextTcpSessionManager;
+          discoveryService = nextDiscoveryService;
+          activeLocalPeer = localPeer;
+          startupPhase = 'ready';
+
+          await failPendingDeliveries('TCP sessions stopped before delivery was acknowledged.');
+          await recordNetworkEvent(`Room "${roomName}" joined. UDP discovery and TCP listener started.`);
+          return getAppStateWithLivePeers();
         } catch (error) {
+          try {
+            await stopRuntimeServices({
+              discoveryService: nextDiscoveryService,
+              tcpSessionManager: nextTcpSessionManager,
+              activeLocalPeer: null
+            });
+          } catch (cleanupError) {
+            const message = cleanupError instanceof Error ? cleanupError.message : 'Unknown runtime cleanup error.';
+            await recordNetworkEvent(`Failed to clean up the replacement room runtime: ${message}`, 'warning');
+          }
+
           tcpSessionManager = null;
-          activeLocalPeer = null;
-          await storage.setRoom({
-            roomName,
-            joined: false,
-            udpPort,
-            tcpPort
-          });
-          const message = error instanceof Error ? error.message : 'Unknown TCP startup error.';
-          await recordNetworkEvent(
-            isAddressInUseError(error)
-              ? describePortUnavailable(createStartupFailureResult('tcp', tcpPort, error))
-              : `Failed to start TCP listener on ${tcpPort}: ${message}`,
-            'error'
-          );
-          throw error;
-        }
-
-        try {
-          await discoveryService.start();
-        } catch (error) {
           discoveryService = null;
-          await stopTcpSessions();
           activeLocalPeer = null;
-          await storage.setRoom({
-            roomName,
-            joined: false,
-            udpPort,
-            tcpPort
-          });
-          const message = error instanceof Error ? error.message : 'Unknown UDP discovery startup error.';
-          await recordNetworkEvent(
-            isAddressInUseError(error)
-              ? describePortUnavailable(createStartupFailureResult('udp', udpPort, error))
-              : `Failed to start UDP discovery on ${udpPort}: ${message}`,
-            'error'
-          );
+
+          const restoreError = await restoreRuntime(previousRuntime);
+          const persistedRoom = restoreError && state.room.joined ? { ...state.room, joined: false } : state.room;
+          try {
+            await storage.setRoom(persistedRoom);
+          } catch (storageError) {
+            const storageMessage =
+              storageError instanceof Error ? storageError.message : 'Unknown room-state restoration error.';
+            await recordNetworkEvent(`Failed to restore persisted room state: ${storageMessage}`, 'error');
+          }
+
+          if (restoreError) {
+            const message = restoreError instanceof Error ? restoreError.message : 'Unknown runtime restore error.';
+            await recordNetworkEvent(`Failed to restore the previous room runtime: ${message}`, 'error');
+          }
+
+          const message = error instanceof Error ? error.message : 'Unknown room startup error.';
+          if (startupPhase === 'tcp') {
+            await recordNetworkEvent(
+              isAddressInUseError(error)
+                ? describePortUnavailable(createStartupFailureResult('tcp', tcpPort, error))
+                : `Failed to start TCP listener on ${tcpPort}: ${message}`,
+              'error'
+            );
+          } else if (startupPhase === 'udp') {
+            await recordNetworkEvent(
+              isAddressInUseError(error)
+                ? describePortUnavailable(createStartupFailureResult('udp', udpPort, error))
+                : `Failed to start UDP discovery on ${udpPort}: ${message}`,
+              'error'
+            );
+          } else {
+            await recordNetworkEvent(`Failed to join room "${roomName}": ${message}`, 'error');
+          }
+
           throw error;
         }
-
-        await recordNetworkEvent(`Room "${roomName}" joined. UDP discovery and TCP listener started.`);
-        return getAppStateWithLivePeers();
       });
     },
 

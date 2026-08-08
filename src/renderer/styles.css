@@ -257,6 +257,56 @@ button:focus-visible,
   background: #f7faf8;
 }
 
+.port-settings {
+  display: grid;
+  gap: 0.55rem;
+  min-width: 0;
+  margin: 0;
+  border: 0;
+  padding: 0;
+}
+
+.port-settings legend {
+  margin-bottom: 0.12rem;
+  padding: 0;
+  color: #516462;
+  font-size: 0.72rem;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.port-settings > .field-note {
+  margin-top: -0.2rem;
+}
+
+.port-input-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.port-input-grid input {
+  font-variant-numeric: tabular-nums;
+}
+
+.field-error {
+  color: #a33b31;
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1.35;
+  text-transform: none;
+}
+
+input[aria-invalid='true'] {
+  border-color: #d85a49;
+  background: #fff8f7;
+}
+
+input[aria-invalid='true']:focus {
+  border-color: #c94c3b;
+  box-shadow: 0 0 0 3px rgb(216 90 73 / 16%);
+}
+
 .section-heading,
 .list-heading {
   display: flex;

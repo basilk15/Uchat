@@ -192,6 +192,28 @@ export class UdpDiscoveryService {
     return this.registry.list();
   }
 
+  async updateLocalPeer(localPeer: DiscoveryPeerIdentity): Promise<void> {
+    const nextLocalPeer = parseDiscoveryPeerIdentity(localPeer);
+    const currentLocalPeer = this.config.localPeer;
+
+    if (
+      nextLocalPeer.id !== currentLocalPeer.id ||
+      nextLocalPeer.publicKey !== currentLocalPeer.publicKey ||
+      nextLocalPeer.roomFingerprint !== currentLocalPeer.roomFingerprint ||
+      nextLocalPeer.udpPort !== currentLocalPeer.udpPort ||
+      nextLocalPeer.tcpPort !== currentLocalPeer.tcpPort ||
+      JSON.stringify(nextLocalPeer.capabilities) !== JSON.stringify(currentLocalPeer.capabilities)
+    ) {
+      throw new Error('Discovery local peer identity fields cannot change while joined.');
+    }
+
+    this.config.localPeer = nextLocalPeer;
+
+    if (this.socket) {
+      await this.send('peer.hello');
+    }
+  }
+
   handleMessage(message: Buffer, remoteInfo: RemoteInfo, nowMs = Date.now()): void {
     const validation = validateDiscoveryPacket(message, this.config.localPeer.roomFingerprint);
 

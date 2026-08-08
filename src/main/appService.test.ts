@@ -24,8 +24,10 @@ import type { TcpConnectOptions, TcpEncryptedMessage, TcpSession, TcpSessionMana
 
 class FakeDiscoveryRuntime implements DiscoveryRuntime {
   readonly peers = new Map<string, Peer>();
+  readonly localPeerUpdates: UdpDiscoveryServiceConfig['localPeer'][] = [];
   startCalls = 0;
   stopCalls = 0;
+  startError: Error | null = null;
 
   constructor(
     readonly config: UdpDiscoveryServiceConfig,
@@ -34,11 +36,21 @@ class FakeDiscoveryRuntime implements DiscoveryRuntime {
 
   start(): Promise<void> {
     this.startCalls += 1;
+    if (this.startError) {
+      return Promise.reject(this.startError);
+    }
+
     return Promise.resolve();
   }
 
   stop(): Promise<void> {
     this.stopCalls += 1;
+    return Promise.resolve();
+  }
+
+  updateLocalPeer(localPeer: UdpDiscoveryServiceConfig['localPeer']): Promise<void> {
+    this.localPeerUpdates.push(localPeer);
+    this.config.localPeer = localPeer;
     return Promise.resolve();
   }
 
@@ -63,6 +75,7 @@ class FakeTcpSessionRuntime implements TcpSessionRuntime {
   startCalls = 0;
   stopCalls = 0;
   failConnect = false;
+  startError: Error | null = null;
 
   constructor(
     readonly config: TcpSessionManagerConfig,
@@ -71,6 +84,10 @@ class FakeTcpSessionRuntime implements TcpSessionRuntime {
 
   start(): Promise<number> {
     this.startCalls += 1;
+    if (this.startError) {
+      return Promise.reject(this.startError);
+    }
+
     return Promise.resolve(this.config.tcpPort ?? 47476);
   }
 
@@ -145,6 +162,11 @@ const createPeer = (id: string, overrides: Partial<Peer> = {}): Peer => ({
   ...overrides
 });
 
+interface HarnessControls {
+  failNextDiscoveryStart: boolean;
+  failNextTcpStart: boolean;
+}
+
 const createHarness = async (
   overrides: Pick<UchatAppServiceOptions, 'checkConfiguredPorts' | 'deliveryAckTimeoutMs' | 'getLanInterfaces'> = {},
   seedStorage?: (storage: ReturnType<typeof createSqliteStorage>) => Promise<void>
@@ -158,6 +180,10 @@ const createHarness = async (
   const messageEvents: ChatMessage[] = [];
   const discoveryRuntimes: FakeDiscoveryRuntime[] = [];
   const tcpRuntimes: FakeTcpSessionRuntime[] = [];
+  const controls: HarnessControls = {
+    failNextDiscoveryStart: false,
+    failNextTcpStart: false
+  };
   const defaultCheckConfiguredPorts: UchatAppServiceOptions['checkConfiguredPorts'] = async ({
     udpPort,
     tcpPort
@@ -175,11 +201,19 @@ const createHarness = async (
   });
   const createDiscoveryService: DiscoveryServiceFactory = (config, events) => {
     const runtime = new FakeDiscoveryRuntime(config, events);
+    if (controls.failNextDiscoveryStart) {
+      runtime.startError = new Error('fake UDP startup failure');
+      controls.failNextDiscoveryStart = false;
+    }
     discoveryRuntimes.push(runtime);
     return runtime;
   };
   const createTcpSessionManager: TcpSessionManagerFactory = (config, events) => {
     const runtime = new FakeTcpSessionRuntime(config, events);
+    if (controls.failNextTcpStart) {
+      runtime.startError = new Error('fake TCP startup failure');
+      controls.failNextTcpStart = false;
+    }
     tcpRuntimes.push(runtime);
     return runtime;
   };
@@ -208,7 +242,8 @@ const createHarness = async (
     peerRemovedEvents,
     messageEvents,
     discoveryRuntimes,
-    tcpRuntimes
+    tcpRuntimes,
+    controls
   };
 };
 
@@ -358,6 +393,137 @@ describe('createUchatAppService discovery integration', () => {
     await service.cleanup();
   });
 
+  it('keeps the active room intact when a reconnect fails its port check and retries successfully', async () => {
+    let rejectCandidatePorts = false;
+    const harness = await createHarness({
+      checkConfiguredPorts: async ({ udpPort, tcpPort }) => ({
+        udp: {
+          protocol: 'udp',
+          port: udpPort,
+          available: true
+        },
+        tcp: {
+          protocol: 'tcp',
+          port: tcpPort,
+          available: !rejectCandidatePorts
+        }
+      })
+    });
+    const { service, storage, discoveryRuntimes, tcpRuntimes } = harness;
+
+    await service.joinRoom({ roomName: 'First', passphrase: 'one', udpPort: 48_888, tcpPort: 48_889 });
+    const oldPeer = createPeer('old-peer');
+    discoveryRuntimes[0].emitPeerUpdated(oldPeer);
+    await waitFor(async () => (await storage.listPeers()).some((peer) => peer.id === oldPeer.id));
+
+    rejectCandidatePorts = true;
+    await expect(
+      service.joinRoom({ roomName: 'Second', passphrase: 'two', udpPort: 49_000, tcpPort: 49_001 })
+    ).rejects.toThrow('Cannot join room because one or more configured ports are unavailable.');
+
+    expect(discoveryRuntimes).toHaveLength(1);
+    expect(tcpRuntimes).toHaveLength(1);
+    expect(discoveryRuntimes[0].stopCalls).toBe(0);
+    expect(tcpRuntimes[0].stopCalls).toBe(0);
+    await expect(service.listPeers()).resolves.toEqual([oldPeer]);
+    await expect(storage.getAppState()).resolves.toEqual(
+      expect.objectContaining({
+        room: {
+          roomName: 'First',
+          joined: true,
+          udpPort: 48_888,
+          tcpPort: 48_889
+        }
+      })
+    );
+
+    rejectCandidatePorts = false;
+    await service.joinRoom({ roomName: 'Second', passphrase: 'two', udpPort: 49_000, tcpPort: 49_001 });
+
+    expect(discoveryRuntimes[0].stopCalls).toBe(1);
+    expect(tcpRuntimes[0].stopCalls).toBe(1);
+    expect(discoveryRuntimes[1].startCalls).toBe(1);
+    expect(tcpRuntimes[1].startCalls).toBe(1);
+    await expect(storage.getAppState()).resolves.toEqual(
+      expect.objectContaining({
+        room: {
+          roomName: 'Second',
+          joined: true,
+          udpPort: 49_000,
+          tcpPort: 49_001
+        }
+      })
+    );
+
+    await service.cleanup();
+  });
+
+  it('restores the active room after TCP startup failure during reconnect', async () => {
+    const { service, discoveryRuntimes, tcpRuntimes, controls } = await createHarness();
+
+    await service.joinRoom({ roomName: 'First', passphrase: 'one', udpPort: 48_888, tcpPort: 48_889 });
+    controls.failNextTcpStart = true;
+
+    await expect(
+      service.joinRoom({ roomName: 'Second', passphrase: 'two', udpPort: 49_000, tcpPort: 49_001 })
+    ).rejects.toThrow('fake TCP startup failure');
+
+    expect(discoveryRuntimes).toHaveLength(2);
+    expect(tcpRuntimes).toHaveLength(2);
+    expect(discoveryRuntimes[0].stopCalls).toBe(1);
+    expect(tcpRuntimes[0].stopCalls).toBe(1);
+    expect(discoveryRuntimes[0].startCalls).toBe(2);
+    expect(tcpRuntimes[0].startCalls).toBe(2);
+    expect(discoveryRuntimes[1].startCalls).toBe(0);
+    expect(tcpRuntimes[1].startCalls).toBe(1);
+    await expect(service.getAppState()).resolves.toEqual(
+      expect.objectContaining({
+        room: {
+          roomName: 'First',
+          joined: true,
+          udpPort: 48_888,
+          tcpPort: 48_889
+        }
+      })
+    );
+    await expect(service.listPeers()).resolves.toEqual([]);
+
+    await service.cleanup();
+  });
+
+  it('restores the active room after UDP startup failure during reconnect', async () => {
+    const { service, storage, discoveryRuntimes, tcpRuntimes, controls } = await createHarness();
+
+    await service.joinRoom({ roomName: 'First', passphrase: 'one', udpPort: 48_888, tcpPort: 48_889 });
+    controls.failNextDiscoveryStart = true;
+
+    await expect(
+      service.joinRoom({ roomName: 'Second', passphrase: 'two', udpPort: 49_000, tcpPort: 49_001 })
+    ).rejects.toThrow('fake UDP startup failure');
+
+    expect(discoveryRuntimes).toHaveLength(2);
+    expect(tcpRuntimes).toHaveLength(2);
+    expect(discoveryRuntimes[0].stopCalls).toBe(1);
+    expect(tcpRuntimes[0].stopCalls).toBe(1);
+    expect(discoveryRuntimes[0].startCalls).toBe(2);
+    expect(tcpRuntimes[0].startCalls).toBe(2);
+    expect(discoveryRuntimes[1].startCalls).toBe(1);
+    expect(tcpRuntimes[1].startCalls).toBe(1);
+    await expect(storage.getAppState()).resolves.toEqual(
+      expect.objectContaining({
+        room: {
+          roomName: 'First',
+          joined: true,
+          udpPort: 48_888,
+          tcpPort: 48_889
+        }
+      })
+    );
+    await expect(service.listPeers()).resolves.toEqual([]);
+
+    await service.cleanup();
+  });
+
   it('restarts discovery on subsequent room joins', async () => {
     const { service, discoveryRuntimes, tcpRuntimes } = await createHarness();
 
@@ -384,6 +550,40 @@ describe('createUchatAppService discovery integration', () => {
 
     expect(discoveryRuntimes[0].stopCalls).toBe(1);
     expect(tcpRuntimes[0].stopCalls).toBe(1);
+  });
+
+  it('updates the active discovery identity and presence without rejoining', async () => {
+    const { service, discoveryRuntimes, storage } = await createHarness();
+
+    await service.setProfile({ displayName: 'Alice', status: 'away' });
+    await service.joinRoom({ roomName: 'Room', passphrase: 'secret' });
+
+    const discovery = discoveryRuntimes[0];
+    const initialIdentity = { ...discovery.config.localPeer };
+
+    await expect(service.setProfile({ displayName: 'Bob', status: 'busy' })).resolves.toEqual({
+      displayName: 'Bob',
+      status: 'busy'
+    });
+
+    expect(discoveryRuntimes).toHaveLength(1);
+    expect(discovery.localPeerUpdates).toHaveLength(1);
+    expect(discovery.config.localPeer).toEqual({
+      ...initialIdentity,
+      displayName: 'Bob',
+      status: 'busy'
+    });
+    await expect(storage.getAppState()).resolves.toEqual(
+      expect.objectContaining({
+        profile: {
+          displayName: 'Bob',
+          status: 'busy'
+        },
+        room: expect.objectContaining({ joined: true })
+      })
+    );
+
+    await service.cleanup();
   });
 
   it('reflects live discovery peers in app state and peer callbacks', async () => {
