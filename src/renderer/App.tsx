@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { DEFAULT_DISCOVERY_PORT, DEFAULT_TCP_PORT } from '@shared/defaults';
 import { createCopyableUfwAllowScript, createUfwAllowCommands } from '@shared/firewall';
@@ -36,6 +36,32 @@ const formatTime = (value: string): string =>
     hour: '2-digit',
     minute: '2-digit'
   }).format(new Date(value));
+
+const isSameCalendarDay = (left: Date, right: Date): boolean =>
+  left.getFullYear() === right.getFullYear() &&
+  left.getMonth() === right.getMonth() &&
+  left.getDate() === right.getDate();
+
+const formatConversationDay = (value: string): string => {
+  const date = new Date(value);
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(yesterday.getDate() - 1);
+
+  if (isSameCalendarDay(date, today)) {
+    return 'Today';
+  }
+
+  if (isSameCalendarDay(date, yesterday)) {
+    return 'Yesterday';
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    month: 'long',
+    day: 'numeric',
+    year: date.getFullYear() === today.getFullYear() ? undefined : 'numeric'
+  }).format(date);
+};
 
 const formatLastSeen = (value: string): string => {
   const minutes = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / 60000));
@@ -150,70 +176,7 @@ const isReliabilityEvent = (event: NetworkEvent): boolean => {
   );
 };
 
-const DEFAULT_LEFT_PANE_WIDTH = 280;
-const DEFAULT_RIGHT_PANE_WIDTH = 330;
-const MIN_LEFT_PANE_WIDTH = 220;
-const MAX_LEFT_PANE_WIDTH = 420;
-const MIN_RIGHT_PANE_WIDTH = 260;
-const MAX_RIGHT_PANE_WIDTH = 460;
-const MIN_CENTER_PANE_WIDTH = 420;
-const RESIZE_HANDLE_WIDTH = 10;
-const RESIZE_STEP = 16;
-
-type ResizeSide = 'left' | 'right';
-
-interface ResizeState {
-  side: ResizeSide;
-  startX: number;
-  startWidth: number;
-}
-
-interface PaneResizeHandleProps {
-  side: ResizeSide;
-  value: number;
-  min: number;
-  max: number;
-  onPointerDown: (event: React.PointerEvent<HTMLDivElement>, side: ResizeSide) => void;
-  onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>, side: ResizeSide) => void;
-}
-
-const PaneResizeHandle = ({
-  side,
-  value,
-  min,
-  max,
-  onPointerDown,
-  onKeyDown
-}: PaneResizeHandleProps): React.JSX.Element => (
-  <div
-    className={`pane-resize-handle ${side}`}
-    role="separator"
-    tabIndex={0}
-    aria-label={`Resize ${side} sidebar`}
-    aria-orientation="vertical"
-    aria-valuemin={min}
-    aria-valuemax={max}
-    aria-valuenow={value}
-    onPointerDown={(event) => onPointerDown(event, side)}
-    onKeyDown={(event) => onKeyDown(event, side)}
-  />
-);
-
-const getViewportWidth = (): number =>
-  typeof window === 'undefined' || window.innerWidth <= 0 ? 1366 : window.innerWidth;
-
-const clampPaneWidth = (
-  side: ResizeSide,
-  width: number,
-  otherPaneWidth: number,
-  viewportWidth = getViewportWidth()
-): number => {
-  const min = side === 'left' ? MIN_LEFT_PANE_WIDTH : MIN_RIGHT_PANE_WIDTH;
-  const max = side === 'left' ? MAX_LEFT_PANE_WIDTH : MAX_RIGHT_PANE_WIDTH;
-  const maxForCenter = viewportWidth - otherPaneWidth - MIN_CENTER_PANE_WIDTH - RESIZE_HANDLE_WIDTH * 2;
-
-  return Math.round(Math.min(max, Math.max(min, Math.min(width, maxForCenter))));
-};
+type ResponsivePanel = 'conversations' | 'details' | null;
 
 export const App = (): React.JSX.Element => {
   const [state, setState] = useState<UchatAppState | null>(null);
@@ -228,88 +191,47 @@ export const App = (): React.JSX.Element => {
   const [udpPortDraft, setUdpPortDraft] = useState(DEFAULT_PORT_DRAFT.udpPort);
   const [tcpPortDraft, setTcpPortDraft] = useState(DEFAULT_PORT_DRAFT.tcpPort);
   const [portErrors, setPortErrors] = useState<PortDraftErrors>({});
-  const [leftPaneWidth, setLeftPaneWidth] = useState(() =>
-    getViewportWidth() <= 1180 ? 250 : DEFAULT_LEFT_PANE_WIDTH
-  );
-  const [rightPaneWidth, setRightPaneWidth] = useState(() =>
-    getViewportWidth() <= 1180 ? 280 : DEFAULT_RIGHT_PANE_WIDTH
-  );
-  const [sendState, setSendState] = useState('Ready');
-  const [copyState, setCopyState] = useState('Copy');
-  const [roomState, setRoomState] = useState('Local only');
+  const [sendState, setSendState] = useState('');
+  const [copyState, setCopyState] = useState('');
+  const [roomState, setRoomState] = useState('Not connected');
   const [bootIssue, setBootIssue] = useState<string | null>(null);
   const [passphraseSubmitted, setPassphraseSubmitted] = useState(false);
-  const resizeRef = useRef<ResizeState | null>(null);
+  const [responsivePanel, setResponsivePanel] = useState<ResponsivePanel>(null);
+  const [roomSettingsOpen, setRoomSettingsOpen] = useState(false);
+  const [profileEditorOpen, setProfileEditorOpen] = useState(false);
+  const portSettingsRef = useRef<HTMLDetailsElement | null>(null);
+  const panelTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const conversationsCloseRef = useRef<HTMLButtonElement | null>(null);
+  const detailsCloseRef = useRef<HTMLButtonElement | null>(null);
+  const previousPanelRef = useRef<ResponsivePanel>(null);
 
   useEffect(() => {
-    const handlePointerMove = (event: PointerEvent): void => {
-      const resize = resizeRef.current;
-      if (!resize) {
-        return;
-      }
+    if (responsivePanel === 'conversations') {
+      conversationsCloseRef.current?.focus();
+    } else if (responsivePanel === 'details') {
+      detailsCloseRef.current?.focus();
+    } else if (previousPanelRef.current) {
+      panelTriggerRef.current?.focus();
+    }
 
-      const delta = event.clientX - resize.startX;
-      if (resize.side === 'left') {
-        setLeftPaneWidth(
-          clampPaneWidth('left', resize.startWidth + delta, rightPaneWidth)
-        );
-      } else {
-        setRightPaneWidth(
-          clampPaneWidth('right', resize.startWidth - delta, leftPaneWidth)
-        );
-      }
-    };
+    previousPanelRef.current = responsivePanel;
+  }, [responsivePanel]);
 
-    const stopResize = (): void => {
-      resizeRef.current = null;
-      document.body.classList.remove('is-resizing');
-    };
-
-    window.addEventListener('pointermove', handlePointerMove);
-    window.addEventListener('pointerup', stopResize);
-    window.addEventListener('pointercancel', stopResize);
-
-    return () => {
-      window.removeEventListener('pointermove', handlePointerMove);
-      window.removeEventListener('pointerup', stopResize);
-      window.removeEventListener('pointercancel', stopResize);
-      document.body.classList.remove('is-resizing');
-    };
-  }, [leftPaneWidth, rightPaneWidth]);
-
-  const handleResizePointerDown = (
-    event: React.PointerEvent<HTMLDivElement>,
-    side: ResizeSide
-  ): void => {
-    event.preventDefault();
-    resizeRef.current = {
-      side,
-      startX: event.clientX,
-      startWidth: side === 'left' ? leftPaneWidth : rightPaneWidth
-    };
-    document.body.classList.add('is-resizing');
-  };
-
-  const handleResizeKeyDown = (
-    event: React.KeyboardEvent<HTMLDivElement>,
-    side: ResizeSide
-  ): void => {
-    const direction = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
-    if (!direction) {
+  useEffect(() => {
+    if (!responsivePanel) {
       return;
     }
 
-    event.preventDefault();
-    if (side === 'left') {
-      setLeftPaneWidth((current) =>
-        clampPaneWidth('left', current + direction * RESIZE_STEP, rightPaneWidth)
-      );
-    } else {
-      setRightPaneWidth((current) =>
-        clampPaneWidth('right', current - direction * RESIZE_STEP, leftPaneWidth)
-      );
-    }
-  };
+    const closeOnEscape = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') {
+        setResponsivePanel(null);
+        setRoomSettingsOpen(false);
+      }
+    };
+
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [responsivePanel]);
 
   useEffect(() => {
     let mounted = true;
@@ -342,7 +264,7 @@ export const App = (): React.JSX.Element => {
         setTcpPortDraft(String(appState.room.tcpPort));
         setPortErrors({});
         setPassphraseSubmitted(false);
-        setRoomState(appState.room.joined ? 'Room joined' : 'Local only');
+        setRoomState(appState.room.joined ? 'Connected' : 'Not connected');
         setBootIssue(null);
       })
       .catch((error: unknown) => {
@@ -433,6 +355,15 @@ export const App = (): React.JSX.Element => {
       ? `UDP ${ports.udpPort} and TCP ${ports.tcpPort} are configured for this room.`
       : 'Join a room to check local UDP and TCP port availability.');
   const onlineCount = peers.filter((peer) => peer.status === 'available').length;
+  const roomStatusTone = roomJoined
+    ? 'success'
+    : roomState === 'Join failed' || roomState === 'Local UI only'
+      ? 'error'
+      : roomState === 'Checking ports'
+        ? 'info'
+        : roomState === 'Check port settings' || roomState === 'Passphrase required'
+          ? 'warning'
+          : 'neutral';
 
   const handleProfileSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
@@ -446,6 +377,7 @@ export const App = (): React.JSX.Element => {
       setState((current) => (current ? { ...current, profile: nextProfile } : current));
       setProfileDraft(nextProfile.displayName);
       setBootIssue('Profile saved only in this renderer session because preload API is unavailable.');
+      setProfileEditorOpen(false);
       return;
     }
 
@@ -454,6 +386,7 @@ export const App = (): React.JSX.Element => {
       setState((current) => (current ? { ...current, profile } : current));
       setProfileDraft(profile.displayName);
       setStatusDraft(profile.status);
+      setProfileEditorOpen(false);
       setBootIssue(null);
     } catch (error) {
       setBootIssue(`Could not save profile: ${formatUnknownError(error)}`);
@@ -470,6 +403,9 @@ export const App = (): React.JSX.Element => {
 
     if (!portValidation.values) {
       setRoomState('Check port settings');
+      if (portSettingsRef.current) {
+        portSettingsRef.current.open = true;
+      }
       setBootIssue('Choose a valid UDP and TCP port before joining.');
       return;
     }
@@ -500,9 +436,11 @@ export const App = (): React.JSX.Element => {
       setUdpPortDraft(String(nextState.room.udpPort));
       setTcpPortDraft(String(nextState.room.tcpPort));
       setPortErrors({});
-      setRoomState('Room joined');
+      setRoomState('Connected');
       setPassphraseSubmitted(true);
       setActiveConversationId('broadcast');
+      setRoomSettingsOpen(false);
+      setResponsivePanel(null);
       setBootIssue(null);
     } catch (error) {
       setRoomState('Join failed');
@@ -539,11 +477,11 @@ export const App = (): React.JSX.Element => {
     }
 
     setDraft('');
-    setSendState('Saving...');
+    setSendState('Sending…');
 
     if (!window.uchat) {
       setMessages((current) => [...current, createLocalMessage(activeConversation.id, body)]);
-      setSendState('Saved in local UI fallback');
+      setSendState('Saved locally');
       setBootIssue('Message stayed local to this renderer session because preload API is unavailable.');
       return;
     }
@@ -554,11 +492,11 @@ export const App = (): React.JSX.Element => {
         body
       });
       setMessages((current) => mergeMessages([...current, sent]));
-      setSendState(`Message ${sent.deliveryState}`);
+      setSendState(sent.deliveryState === 'delivered' ? 'Delivered' : 'Sent');
       setBootIssue(null);
     } catch (error) {
       setMessages((current) => [...current, createLocalMessage(activeConversation.id, body)]);
-      setSendState('Mock direct message kept local');
+      setSendState('Saved locally');
       setBootIssue(`Message kept in local UI state: ${formatUnknownError(error)}`);
     }
   };
@@ -568,21 +506,19 @@ export const App = (): React.JSX.Element => {
       await navigator.clipboard.writeText(text);
       setCopyState(label);
     } catch {
-      setCopyState('Copy failed');
+      setCopyState('Could not copy to clipboard.');
     }
   };
 
-  const shellStyle = {
-    '--left-pane-width': `${leftPaneWidth}px`,
-    '--right-pane-width': `${rightPaneWidth}px`
-  } as React.CSSProperties;
-
   return (
-    <main className="uchat-shell" style={shellStyle}>
+    <main className={`uchat-shell${responsivePanel ? ` panel-open-${responsivePanel}` : ''}`}>
       {bootIssue ? (
-        <section className="boot-banner" role="status" aria-live="polite">
-          <strong>Renderer fallback active</strong>
-          <span>{bootIssue}</span>
+        <section className="app-alert" role="alert" aria-live="assertive">
+          <span className="alert-mark" aria-hidden="true">!</span>
+          <p>{bootIssue}</p>
+          <button type="button" onClick={() => setBootIssue(null)} aria-label="Dismiss message">
+            Dismiss
+          </button>
         </section>
       ) : null}
 
@@ -593,115 +529,48 @@ export const App = (): React.JSX.Element => {
           </div>
           <div>
             <h1>Uchat</h1>
-            <p>Linux LAN messenger</p>
+            <p>Private local chat</p>
           </div>
+          <button
+            className="pane-close nav-close"
+            ref={conversationsCloseRef}
+            type="button"
+            onClick={() => {
+              setResponsivePanel(null);
+              setRoomSettingsOpen(false);
+            }}
+          >
+            Close
+          </button>
         </header>
 
-        <form className="profile-card" onSubmit={handleProfileSubmit}>
-          <div className="avatar" aria-hidden="true">
-            {getInitials(state?.profile.displayName ?? profileDraft)}
-          </div>
-          <div className="profile-fields">
-            <label>
-              Display name
-              <input
-                id="display-name"
-                autoComplete="name"
-                value={profileDraft}
-                onChange={(event) => setProfileDraft(event.target.value)}
-              />
-            </label>
-            <label>
-              Status
-              <select
-                id="presence-status"
-                value={statusDraft}
-                onChange={(event) => setStatusDraft(event.target.value as PresenceStatus)}
-              >
-                <option value="available">Available</option>
-                <option value="away">Away</option>
-                <option value="busy">Busy</option>
-              </select>
-            </label>
-          </div>
-          <button className="secondary-button" type="submit">
-            Save
-          </button>
-        </form>
-
-        <form className="room-card" onSubmit={handleJoinRoom} noValidate>
-          <div className="section-heading">
-            <span>LAN status</span>
-            <strong>{roomState}</strong>
-          </div>
-          <label>
-            Room
-            <input id="room-name" value={roomDraft} onChange={(event) => setRoomDraft(event.target.value)} />
-          </label>
-          <label>
-            Passphrase
-            <input
-              id="room-passphrase"
-              type="password"
-              autoComplete="current-password"
-              value={passphraseDraft}
-              onChange={(event) => setPassphraseDraft(event.target.value)}
-            />
-            <span className="field-note">Not stored. Re-enter to reconnect after restart.</span>
-          </label>
-          <fieldset className="port-settings" aria-describedby="port-settings-help">
-            <legend>Network ports</legend>
-            <span className="field-note" id="port-settings-help">
-              Choose alternate ports if the defaults are already in use. Firewall commands update after a successful join.
-            </span>
-            <div className="port-input-grid">
-              {(['udpPort', 'tcpPort'] as const).map((field) => {
-                const isUdp = field === 'udpPort';
-                const inputId = isUdp ? 'udp-port' : 'tcp-port';
-                const helperId = `${inputId}-help`;
-                const errorId = `${inputId}-error`;
-                const error = portErrors[field];
-                const label = PORT_FIELD_LABELS[field];
-                const value = isUdp ? udpPortDraft : tcpPortDraft;
-                const defaultPort = isUdp ? DEFAULT_DISCOVERY_PORT : DEFAULT_TCP_PORT;
-
-                return (
-                  <label htmlFor={inputId} key={field}>
-                    {label}
-                    <input
-                      id={inputId}
-                      type="number"
-                      inputMode="numeric"
-                      min={MIN_PORT}
-                      max={MAX_PORT}
-                      step={1}
-                      required
-                      value={value}
-                      aria-describedby={error ? `${helperId} ${errorId}` : helperId}
-                      aria-invalid={error ? 'true' : undefined}
-                      onBlur={(event) => handlePortBlur(field, event.target.value)}
-                      onChange={(event) => handlePortChange(field, event.target.value)}
-                    />
-                    <span className="field-note" id={helperId}>
-                      Default: {defaultPort.toLocaleString()} · {PORT_RANGE_HELPER}
-                    </span>
-                    {error ? (
-                      <span className="field-error" id={errorId} role="alert">
-                        {error}
-                      </span>
-                    ) : null}
-                  </label>
-                );
-              })}
-            </div>
-          </fieldset>
-          <button type="submit">{roomJoined ? 'Reconnect room' : 'Join local room'}</button>
-        </form>
+        <button
+          className="room-switcher"
+          type="button"
+          aria-controls="right-pane"
+          aria-expanded={responsivePanel === 'details' && roomSettingsOpen}
+          onClick={(event) => {
+            panelTriggerRef.current = event.currentTarget;
+            setRoomSettingsOpen(true);
+            setResponsivePanel('details');
+          }}
+        >
+          <span className="room-switcher-icon" aria-hidden="true">#</span>
+          <span className="room-switcher-copy">
+            <span className="eyebrow">YOUR ROOM</span>
+            <strong>{roomJoined ? state?.room.roomName ?? roomDraft : 'Not connected'}</strong>
+            <small>
+              <span className={`presence-dot ${roomJoined ? 'available' : 'away'}`} aria-hidden="true" />
+              {roomJoined ? `${onlineCount} nearby` : 'Connect to get started'}
+            </small>
+          </span>
+          <span className="room-switcher-action">{roomJoined ? 'Manage' : 'Join'} <span aria-hidden="true">›</span></span>
+        </button>
 
         <nav className="conversation-list" aria-label="Conversations">
           <div className="list-heading">
-            <span>Peers</span>
-            <strong>{onlineCount}/{peers.length} available</strong>
+            <span>CHATS</span>
+            {roomJoined ? <strong>{onlineCount} online</strong> : null}
           </div>
 
           <button
@@ -710,14 +579,18 @@ export const App = (): React.JSX.Element => {
             }`}
             type="button"
             aria-pressed={activeConversation?.id === 'broadcast'}
-            onClick={() => setActiveConversationId('broadcast')}
+            onClick={() => {
+              setActiveConversationId('broadcast');
+              setResponsivePanel(null);
+              setRoomSettingsOpen(false);
+            }}
           >
             <span className="room-glyph" aria-hidden="true">
               #
             </span>
             <span>
               <strong>Broadcast room</strong>
-              <small>{peers.length} discovered peers</small>
+              <small>{peers.length} peers in this room</small>
             </span>
           </button>
 
@@ -728,7 +601,11 @@ export const App = (): React.JSX.Element => {
                 type="button"
                 key={peer.id}
                 aria-pressed={activeConversation?.peerId === peer.id}
-                onClick={() => setActiveConversationId(`direct-${peer.id}`)}
+                onClick={() => {
+                  setActiveConversationId(`direct-${peer.id}`);
+                  setResponsivePanel(null);
+                  setRoomSettingsOpen(false);
+                }}
               >
                 <span className="avatar small" aria-hidden="true">
                   {getInitials(peer.displayName)}
@@ -737,98 +614,322 @@ export const App = (): React.JSX.Element => {
                   <strong>{peer.displayName}</strong>
                   <small>
                     <span className={`presence-dot ${peer.status}`} aria-hidden="true" />
-                    {peer.status === 'available' ? 'Same WiFi' : peer.status}
+                    {peer.status === 'available' ? 'Available' : peer.status}
                   </small>
                 </span>
-                <em>{peer.tcpPort}</em>
               </button>
             ))
           ) : (
             <div className="empty-list">
-              <strong>No peers discovered</strong>
-              <span>Join the same room on another device or start the local simulator.</span>
+              <strong>{roomJoined ? 'No one nearby yet' : 'Your people will show up here'}</strong>
+              <span>{roomJoined ? 'When someone joins this room, they’ll appear here.' : 'Join a room to find people on your local network.'}</span>
             </div>
           )}
         </nav>
-      </aside>
 
-      <PaneResizeHandle
-        side="left"
-        value={leftPaneWidth}
-        min={MIN_LEFT_PANE_WIDTH}
-        max={MAX_LEFT_PANE_WIDTH}
-        onPointerDown={handleResizePointerDown}
-        onKeyDown={handleResizeKeyDown}
-      />
+        <form className={`profile-card${profileEditorOpen ? ' editing' : ''}`} aria-label="Your profile" onSubmit={handleProfileSubmit}>
+          {!profileEditorOpen ? (
+            <div className="profile-summary">
+              <div className="avatar" aria-hidden="true">
+                {getInitials(state?.profile.displayName ?? profileDraft)}
+              </div>
+              <div className="profile-summary-copy">
+                <span className="eyebrow">YOUR PROFILE</span>
+                <strong>{profileDraft}</strong>
+                <small><span className={`presence-dot ${statusDraft}`} aria-hidden="true" />{statusDraft}</small>
+              </div>
+              <button
+                className="quiet-button"
+                type="button"
+                aria-expanded={profileEditorOpen}
+                onClick={() => setProfileEditorOpen(true)}
+              >
+                Edit
+              </button>
+            </div>
+          ) : (
+            <>
+              <div className="profile-edit-heading">
+                <span className="avatar" aria-hidden="true">{getInitials(profileDraft)}</span>
+                <strong>Edit your profile</strong>
+              </div>
+              <div className="profile-fields">
+                <label>
+                  Display name
+                  <input
+                    id="display-name"
+                    autoComplete="name"
+                    value={profileDraft}
+                    onChange={(event) => setProfileDraft(event.target.value)}
+                  />
+                </label>
+                <label>
+                  Status
+                  <select
+                    id="presence-status"
+                    value={statusDraft}
+                    onChange={(event) => setStatusDraft(event.target.value as PresenceStatus)}
+                  >
+                    <option value="available">Available</option>
+                    <option value="away">Away</option>
+                    <option value="busy">Busy</option>
+                  </select>
+                </label>
+              </div>
+              <div className="profile-actions">
+                <button
+                  className="quiet-button"
+                  type="button"
+                  onClick={() => {
+                    setProfileDraft(state?.profile.displayName ?? 'Basil');
+                    setStatusDraft(state?.profile.status ?? 'available');
+                    setProfileEditorOpen(false);
+                  }}
+                >
+                  Cancel
+                </button>
+                <button className="secondary-button" type="submit">Save profile</button>
+              </div>
+            </>
+          )}
+        </form>
+      </aside>
 
       <section className="pane chat-pane" aria-label="Active conversation">
         <header className="chat-header">
+          <div className="chat-actions">
+            <button
+              className="panel-toggle conversations-toggle"
+              ref={panelTriggerRef}
+              type="button"
+              aria-controls="left-pane"
+              aria-expanded={responsivePanel === 'conversations'}
+              onClick={(event) => {
+                panelTriggerRef.current = event.currentTarget;
+                setResponsivePanel((current) => current === 'conversations' ? null : 'conversations');
+              }}
+            >
+              Chats
+            </button>
+            <button
+              className="panel-toggle details-toggle"
+              ref={panelTriggerRef}
+              type="button"
+              aria-controls="right-pane"
+              aria-expanded={responsivePanel === 'details'}
+              onClick={(event) => {
+                panelTriggerRef.current = event.currentTarget;
+                setRoomSettingsOpen(false);
+                setResponsivePanel((current) => current === 'details' ? null : 'details');
+              }}
+            >
+              <span className="details-button-mark" aria-hidden="true" />
+              Room info
+            </button>
+          </div>
           <div className="avatar" aria-hidden="true">
             {getInitials(activeConversation?.title ?? 'Broadcast')}
           </div>
-          <div>
+          <div className="chat-heading">
             <h2>{activeConversation?.title ?? 'Broadcast room'}</h2>
             <p>
               {selectedPeer
                 ? `${selectedPeer.address} / TCP ${selectedPeer.tcpPort}`
                 : directConversationOffline
                   ? 'Peer offline — messages will be saved as unsent until they return.'
-                : `${peers.length} discovered peers receive broadcast messages`}
+                  : !roomJoined
+                    ? 'Connect to a room to start chatting.'
+                    : peers.length === 0
+                      ? 'No peers in this room yet.'
+                      : `${onlineCount} of ${peers.length} peers online`}
             </p>
           </div>
-          <span className="send-state" aria-live="polite">
-            {sendState}
-          </span>
+          {sendState ? <span className="send-state" aria-live="polite">{sendState}</span> : null}
         </header>
 
         <div className="message-history" aria-label="Message history" aria-live="polite">
-          <div className="day-divider">
-            <span>Today</span>
-          </div>
-          {visibleMessages.length > 0 ? (
-            visibleMessages.map((message) => (
-              <article className={`message ${message.author}`} key={message.id}>
-                <div className="message-bubble">
-                  <p>{message.body}</p>
-                  <footer>
-                    <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
-                    <span>{message.deliveryState}</span>
-                  </footer>
-                </div>
-              </article>
-            ))
+          {!roomJoined ? (
+            <section className="welcome-state" aria-labelledby="welcome-title">
+              <div className="network-illustration" aria-hidden="true">
+                <svg viewBox="0 0 220 170" fill="none">
+                  <path d="M56 78 105 45l56 24-8 56-64 11-33-58Z" />
+                  <path d="m56 78 33 58m16-91 48 80m8-56L89 136m72-67-72 67" />
+                  <circle cx="56" cy="78" r="15" />
+                  <circle cx="105" cy="45" r="15" />
+                  <circle cx="161" cy="69" r="15" />
+                  <circle cx="153" cy="125" r="15" />
+                  <circle cx="89" cy="136" r="15" />
+                </svg>
+                <span className="network-node node-one">Y</span>
+                <span className="network-node node-two">A</span>
+                <span className="network-node node-three">M</span>
+              </div>
+              <p className="eyebrow">PRIVATE CHATS, CLOSE TO HOME</p>
+              <h2 id="welcome-title">Talk with people nearby.</h2>
+              <p className="welcome-copy">
+                Join the same room as your friends or teammates, then message over your local Wi-Fi.
+              </p>
+              <button
+                className="primary-button welcome-button"
+                type="button"
+                onClick={(event) => {
+                  panelTriggerRef.current = event.currentTarget;
+                  setRoomSettingsOpen(true);
+                  setResponsivePanel('details');
+                }}
+              >
+                Connect to a room <span className="button-arrow" aria-hidden="true" />
+              </button>
+              <span className="welcome-note">Your room passphrase is only used for this session.</span>
+            </section>
+          ) : visibleMessages.length > 0 ? (
+            visibleMessages.map((message, index) => {
+              const currentDate = new Date(message.createdAt);
+              const previousMessage = visibleMessages[index - 1];
+              const startsDay = !previousMessage ||
+                !isSameCalendarDay(currentDate, new Date(previousMessage.createdAt));
+
+              return (
+                <Fragment key={message.id}>
+                  {startsDay ? (
+                    <div className="day-divider">
+                      <span>{formatConversationDay(message.createdAt)}</span>
+                    </div>
+                  ) : null}
+                  <article className={`message ${message.author}`}>
+                    <div className="message-bubble">
+                      <p>{message.body}</p>
+                      <footer>
+                        <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
+                        <span>{message.deliveryState}</span>
+                      </footer>
+                    </div>
+                  </article>
+                </Fragment>
+              );
+            })
           ) : (
             <div className="empty-thread">
+              <span className="empty-thread-mark" aria-hidden="true">#</span>
               <strong>No messages yet</strong>
-              <span>Messages will appear here after local sends or LAN delivery.</span>
+              <span>Say hello to everyone in the room to get things going.</span>
             </div>
           )}
         </div>
 
-        <form className="composer" onSubmit={handleSend}>
-          <textarea
-            aria-label="Message"
-            placeholder={`Message ${activeConversation?.title ?? 'Broadcast room'}`}
-            rows={1}
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-          />
-          <button type="submit" disabled={!draft.trim()}>
-            Send
-          </button>
-        </form>
+        {roomJoined ? (
+          <form className="composer" onSubmit={handleSend}>
+            <textarea
+              aria-label="Message"
+              placeholder={`Message ${activeConversation?.title ?? 'Broadcast room'}`}
+              rows={1}
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+            />
+            <button type="submit" disabled={!draft.trim()}>
+              Send <span className="send-arrow" aria-hidden="true" />
+            </button>
+          </form>
+        ) : null}
       </section>
 
-      <PaneResizeHandle
-        side="right"
-        value={rightPaneWidth}
-        min={MIN_RIGHT_PANE_WIDTH}
-        max={MAX_RIGHT_PANE_WIDTH}
-        onPointerDown={handleResizePointerDown}
-        onKeyDown={handleResizeKeyDown}
-      />
+      <aside
+        id="right-pane"
+        className="pane right-pane"
+        aria-label={roomSettingsOpen ? 'Room settings' : 'Room and peer details'}
+        aria-labelledby="drawer-title"
+      >
+        <header className="detail-pane-header">
+          <div>
+            <span className="eyebrow">{roomSettingsOpen ? 'CONNECTION' : 'AT A GLANCE'}</span>
+            <h2 id="drawer-title">{roomSettingsOpen ? 'Room settings' : 'Room info'}</h2>
+          </div>
+          <button
+            className="pane-close"
+            ref={detailsCloseRef}
+            type="button"
+            onClick={() => {
+              setResponsivePanel(null);
+              setRoomSettingsOpen(false);
+            }}
+          >
+            Close
+          </button>
+        </header>
+        {roomSettingsOpen ? (
+          <div className="drawer-scroll settings-view">
+            <div className="settings-intro">
+              <span className="settings-icon" aria-hidden="true">#</span>
+              <p>Use the same room name and passphrase as the people you want to reach.</p>
+            </div>
+            <form className="connection-form" onSubmit={handleJoinRoom} noValidate>
+              <div className="section-heading">
+                <span>Room connection</span>
+                <span className={`connection-pill ${roomStatusTone}`} aria-live="polite">{roomState}</span>
+              </div>
+              <label>
+                Room name
+                <input id="room-name" autoComplete="off" value={roomDraft} onChange={(event) => setRoomDraft(event.target.value)} />
+              </label>
+              <label>
+                Passphrase
+                <input
+                  id="room-passphrase"
+                  type="password"
+                  autoComplete="current-password"
+                  value={passphraseDraft}
+                  onChange={(event) => setPassphraseDraft(event.target.value)}
+                />
+                <span className="field-note">Used for this session only. It isn’t saved after you quit.</span>
+              </label>
+              <details className="advanced-settings" ref={portSettingsRef}>
+                <summary>Advanced port settings</summary>
+                <fieldset className="port-settings" aria-describedby="port-settings-help">
+                  <legend>Network ports</legend>
+                  <span className="field-note" id="port-settings-help">Change these only if the default ports are already in use.</span>
+                  <div className="port-input-grid">
+                    {(['udpPort', 'tcpPort'] as const).map((field) => {
+                      const isUdp = field === 'udpPort';
+                      const inputId = isUdp ? 'udp-port' : 'tcp-port';
+                      const helperId = `${inputId}-help`;
+                      const errorId = `${inputId}-error`;
+                      const error = portErrors[field];
+                      const label = PORT_FIELD_LABELS[field];
+                      const value = isUdp ? udpPortDraft : tcpPortDraft;
+                      const defaultPort = isUdp ? DEFAULT_DISCOVERY_PORT : DEFAULT_TCP_PORT;
 
-      <aside id="right-pane" className="pane right-pane" aria-label="Network and peer details">
+                      return (
+                        <label htmlFor={inputId} key={field}>
+                          {label}
+                          <input
+                            id={inputId}
+                            type="number"
+                            inputMode="numeric"
+                            min={MIN_PORT}
+                            max={MAX_PORT}
+                            step={1}
+                            required
+                            value={value}
+                            aria-describedby={error ? `${helperId} ${errorId}` : helperId}
+                            aria-invalid={error ? 'true' : undefined}
+                            onBlur={(event) => handlePortBlur(field, event.target.value)}
+                            onChange={(event) => handlePortChange(field, event.target.value)}
+                          />
+                          <span className="field-note" id={helperId}>Default: {defaultPort.toLocaleString()} · {PORT_RANGE_HELPER}</span>
+                          {error ? <span className="field-error" id={errorId} role="alert">{error}</span> : null}
+                        </label>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+              </details>
+              <button className="primary-button" type="submit">
+                {roomJoined ? 'Reconnect to room' : 'Join room'} <span className="button-arrow" aria-hidden="true" />
+              </button>
+            </form>
+          </div>
+        ) : (
+          <div className="drawer-scroll">
         <section className="detail-section peer-summary">
           <div className="section-heading">
             <span>{selectedPeer ? 'Peer details' : directConversationOffline ? 'Direct conversation' : 'Room details'}</span>
@@ -860,6 +961,13 @@ export const App = (): React.JSX.Element => {
               </dd>
             </div>
           </dl>
+        </section>
+
+        <section className="detail-section room-action-section">
+          <p className="muted-copy">Need to join another room or update your connection?</p>
+          <button className="secondary-button wide" type="button" onClick={() => setRoomSettingsOpen(true)}>
+            Open room settings <span className="button-arrow" aria-hidden="true" />
+          </button>
         </section>
 
         <section className="detail-section">
@@ -897,10 +1005,11 @@ export const App = (): React.JSX.Element => {
                 type="button"
                 key={command.protocol}
                 aria-label={`Copy ${command.protocol.toUpperCase()} firewall command`}
-                onClick={() => copyText(command.command, `${command.protocol.toUpperCase()} copied`)}
+                onClick={() => copyText(command.command, `${command.protocol.toUpperCase()} command copied.`)}
               >
-                <span>{command.protocol.toUpperCase()}</span>
+                <span className="copy-protocol">{command.protocol.toUpperCase()}</span>
                 <code>{command.command}</code>
+                <span className="copy-action">Copy</span>
               </button>
             ))}
           </div>
@@ -908,10 +1017,11 @@ export const App = (): React.JSX.Element => {
             className="secondary-button wide"
             type="button"
             aria-label="Copy both firewall commands"
-            onClick={() => copyText(ufwScript, 'Both copied')}
+            onClick={() => copyText(ufwScript, 'Firewall commands copied.')}
           >
-            {copyState}
+            Copy both commands
           </button>
+          {copyState ? <p className="copy-feedback" role="status" aria-live="polite">{copyState}</p> : null}
         </section>
 
         <section className="detail-section events-section">
@@ -919,15 +1029,21 @@ export const App = (): React.JSX.Element => {
             <span>Network events</span>
             <strong>{events.length}</strong>
           </div>
-          <ol className="event-timeline" aria-label="Recent network events">
-            {events.map((event) => (
-              <li className={event.level} key={event.id}>
-                <span>{formatTime(event.createdAt)}</span>
-                <p>{event.message}</p>
-              </li>
-            ))}
-          </ol>
+          {events.length ? (
+            <ol className="event-timeline" aria-label="Recent network events">
+              {events.map((event) => (
+                <li className={event.level} key={event.id}>
+                  <span>{formatTime(event.createdAt)}</span>
+                  <p>{event.message}</p>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="empty-note">No network events yet.</p>
+          )}
         </section>
+          </div>
+        )}
       </aside>
     </main>
   );
