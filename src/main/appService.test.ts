@@ -309,6 +309,26 @@ describe('createUchatAppService discovery integration', () => {
     await service.cleanup();
   });
 
+  it('makes interrupted outgoing messages retryable after a restart', async () => {
+    const { service, networkEvents } = await createHarness({}, async (seed) => {
+      await seed.createMessage({
+        id: 'interrupted-sending', conversationId: 'broadcast', body: 'one', author: 'local', deliveryState: 'sending'
+      });
+      await seed.createMessage({
+        id: 'interrupted-sent', conversationId: 'broadcast', body: 'two', author: 'local', deliveryState: 'sent'
+      });
+    });
+
+    const state = await service.getAppState();
+    expect(state.messages.filter((message) => message.id.startsWith('interrupted-')))
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'interrupted-sending', deliveryState: 'failed' }),
+        expect.objectContaining({ id: 'interrupted-sent', deliveryState: 'failed' })
+      ]));
+    expect(networkEvents).toContain('2 interrupted messages can be retried.');
+    await service.cleanup();
+  });
+
   it('derives room identity and starts discovery when joining a room', async () => {
     const { service, storage, discoveryRuntimes, tcpRuntimes, networkEvents } = await createHarness();
 
@@ -340,6 +360,7 @@ describe('createUchatAppService discovery integration', () => {
     expect(discoveryRuntimes[0].config.localPeer.roomFingerprint.length).toBeGreaterThan(0);
     expect(state.room).toEqual({
       roomName: 'Team Room',
+      roomId: expect.any(String),
       joined: true,
       udpPort: 48_888,
       tcpPort: 48_889
@@ -430,6 +451,7 @@ describe('createUchatAppService discovery integration', () => {
       expect.objectContaining({
         room: {
           roomName: 'First',
+          roomId: expect.any(String),
           joined: true,
           udpPort: 48_888,
           tcpPort: 48_889
@@ -448,6 +470,7 @@ describe('createUchatAppService discovery integration', () => {
       expect.objectContaining({
         room: {
           roomName: 'Second',
+          roomId: expect.any(String),
           joined: true,
           udpPort: 49_000,
           tcpPort: 49_001
@@ -480,6 +503,7 @@ describe('createUchatAppService discovery integration', () => {
       expect.objectContaining({
         room: {
           roomName: 'First',
+          roomId: expect.any(String),
           joined: true,
           udpPort: 48_888,
           tcpPort: 48_889
@@ -513,6 +537,7 @@ describe('createUchatAppService discovery integration', () => {
       expect.objectContaining({
         room: {
           roomName: 'First',
+          roomId: expect.any(String),
           joined: true,
           udpPort: 48_888,
           tcpPort: 48_889
@@ -538,6 +563,29 @@ describe('createUchatAppService discovery integration', () => {
     expect(tcpRuntimes[1].startCalls).toBe(1);
     expect(discoveryRuntimes[1].config.udpPort).toBe(49_000);
 
+    await service.cleanup();
+  });
+
+  it('keeps peer identity and history within a room while separating different rooms', async () => {
+    const { service, storage, discoveryRuntimes } = await createHarness();
+    await service.joinRoom({ roomName: 'First', passphrase: 'one' });
+    const firstPeerId = discoveryRuntimes[0].config.localPeer.id;
+    const firstMessage = await service.sendMessage({ conversationId: 'broadcast', body: 'first room' });
+
+    await service.joinRoom({ roomName: 'Second', passphrase: 'two' });
+    const secondPeerId = discoveryRuntimes[1].config.localPeer.id;
+    const secondMessage = await service.sendMessage({ conversationId: 'broadcast', body: 'second room' });
+    expect(secondPeerId).not.toBe(firstPeerId);
+    expect(secondMessage.conversationId).not.toBe(firstMessage.conversationId);
+    await expect(service.sendMessage({ conversationId: firstMessage.conversationId, body: 'wrong room' }))
+      .rejects.toThrow('another room');
+    await expect(storage.listMessages(firstMessage.conversationId)).resolves.toContainEqual(firstMessage);
+    await expect(storage.listMessages(secondMessage.conversationId)).resolves.toContainEqual(secondMessage);
+
+    await service.joinRoom({ roomName: 'First', passphrase: 'one' });
+    expect(discoveryRuntimes[2].config.localPeer.id).toBe(firstPeerId);
+    const state = await service.getAppState();
+    expect(state.room.roomId).toBe(firstMessage.conversationId.replace('broadcast-', ''));
     await service.cleanup();
   });
 
@@ -613,7 +661,8 @@ describe('createUchatAppService discovery integration', () => {
       id: 'direct-peer-a',
       kind: 'direct',
       title: peer.displayName,
-      peerId: peer.id
+      peerId: peer.id,
+      roomId: (await storage.getAppState()).room.roomId
     });
 
     discoveryRuntimes[0].emitPeerRemoved(peer.id);
@@ -700,7 +749,7 @@ describe('createUchatAppService discovery integration', () => {
     });
     await nextTick();
 
-    await expect(storage.listMessages('broadcast')).resolves.toContainEqual(
+    await expect(storage.listMessages(message.conversationId)).resolves.toContainEqual(
       expect.objectContaining({
         id: message.id,
         deliveryState: 'sent'
@@ -719,7 +768,7 @@ describe('createUchatAppService discovery integration', () => {
       payload: serializeChatFrame(createChatAckFrame(message.id))
     });
     await waitFor(async () =>
-      (await storage.listMessages('broadcast')).some(
+      (await storage.listMessages(message.conversationId)).some(
         (current) => current.id === message.id && current.deliveryState === 'delivered'
       )
     );
@@ -742,7 +791,8 @@ describe('createUchatAppService discovery integration', () => {
       id: 'direct-peer-a',
       kind: 'direct',
       title: 'Peer A',
-      peerId: 'peer-a'
+      peerId: 'peer-a',
+      roomId: (await storage.getAppState()).room.roomId
     });
 
     const message = await service.sendMessage({
@@ -752,6 +802,35 @@ describe('createUchatAppService discovery integration', () => {
 
     expect(message.deliveryState).toBe('unsent');
 
+    await service.cleanup();
+  });
+
+  it('retries a saved direct message with the same id after the peer returns', async () => {
+    const { service, storage, discoveryRuntimes, tcpRuntimes } = await createHarness();
+    await service.joinRoom({ roomName: 'Room', passphrase: 'secret' });
+    const roomId = discoveryRuntimes[0].config.localPeer.roomFingerprint;
+    const conversation = await storage.createConversation({
+      id: `direct-${roomId}-peer-a`, kind: 'direct', title: 'Peer A', peerId: 'peer-a', roomId, roomName: 'Room'
+    });
+    const unsent = await service.sendMessage({ conversationId: conversation.id, body: 'save this' });
+    expect(unsent.deliveryState).toBe('unsent');
+
+    discoveryRuntimes[0].emitPeerUpdated(createPeer('peer-a', { roomFingerprint: roomId }));
+    const retried = await service.retryMessage({ messageId: unsent.id });
+    expect(retried.id).toBe(unsent.id);
+    expect(retried.deliveryState).toBe('sent');
+    expect(tcpRuntimes[0].sent).toHaveLength(1);
+    await expect(service.retryMessage({ messageId: unsent.id })).rejects.toThrow('Only failed or unsent');
+
+    const session = tcpRuntimes[0].sessions[0];
+    tcpRuntimes[0].emitEncryptedMessage({
+      session,
+      contentType: CHAT_ACK_CONTENT_TYPE,
+      payload: serializeChatFrame(createChatAckFrame(unsent.id))
+    });
+    await waitFor(async () => (await storage.listMessages(conversation.id)).some(
+      (message) => message.id === unsent.id && message.deliveryState === 'delivered'
+    ));
     await service.cleanup();
   });
 
@@ -768,7 +847,8 @@ describe('createUchatAppService discovery integration', () => {
       id: 'direct-peer-a',
       kind: 'direct',
       title: 'Peer A',
-      peerId: 'peer-a'
+      peerId: 'peer-a',
+      roomId: (await storage.getAppState()).room.roomId
     });
 
     const message = await service.sendMessage({
@@ -831,6 +911,8 @@ describe('createUchatAppService discovery integration', () => {
         id: 'remote-message-1',
         body: 'hello local',
         author: 'peer',
+        senderPeerId: 'peer-a',
+        senderName: 'Peer A',
         deliveryState: 'delivered'
       })
     ]);
@@ -849,6 +931,34 @@ describe('createUchatAppService discovery integration', () => {
     await service.cleanup();
   });
 
+  it('attributes broadcast messages from different peers in the same room', async () => {
+    const { service, storage, tcpRuntimes } = await createHarness();
+    const state = await service.joinRoom({ roomName: 'Room', passphrase: 'secret' });
+    const roomId = state.room.roomId as string;
+    const localPeer = tcpRuntimes[0].config.peer;
+
+    for (const [id, displayName] of [['peer-a', 'Ada'], ['peer-b', 'Ben']] as const) {
+      const session = await tcpRuntimes[0].connectToPeer({
+        peer: { ...localPeer, id, displayName, publicKey: `public-key-${id}` },
+        address: '127.0.0.1'
+      });
+      tcpRuntimes[0].emitEncryptedMessage({
+        session,
+        contentType: CHAT_MESSAGE_CONTENT_TYPE,
+        payload: serializeChatFrame(createChatMessageFrame({
+          messageId: `broadcast-${id}`, body: `hello from ${displayName}`, scope: 'broadcast'
+        }))
+      });
+    }
+
+    await waitFor(async () => (await storage.listMessages(`broadcast-${roomId}`)).length === 2);
+    expect(await storage.listMessages(`broadcast-${roomId}`)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ senderPeerId: 'peer-a', senderName: 'Ada' }),
+      expect.objectContaining({ senderPeerId: 'peer-b', senderName: 'Ben' })
+    ]));
+    await service.cleanup();
+  });
+
   it('updates local message delivery when chat acknowledgements arrive', async () => {
     const { service, storage, messageEvents, discoveryRuntimes, tcpRuntimes } = await createHarness();
 
@@ -860,7 +970,8 @@ describe('createUchatAppService discovery integration', () => {
       id: 'direct-peer-a',
       kind: 'direct',
       title: 'Peer A',
-      peerId: 'peer-a'
+      peerId: 'peer-a',
+      roomId: (await storage.getAppState()).room.roomId
     });
     const message = await service.sendMessage({
       conversationId: 'direct-peer-a',
@@ -910,7 +1021,8 @@ describe('createUchatAppService discovery integration', () => {
       id: 'direct-peer-a',
       kind: 'direct',
       title: 'Peer A',
-      peerId: 'peer-a'
+      peerId: 'peer-a',
+      roomId: (await storage.getAppState()).room.roomId
     });
 
     const message = await service.sendMessage({
@@ -989,12 +1101,12 @@ describe('createUchatAppService discovery integration', () => {
     });
 
     await waitFor(async () =>
-      (await storage.listMessages('broadcast')).some(
+      (await storage.listMessages(message.conversationId)).some(
         (current) => current.id === message.id && current.deliveryState === 'failed'
       )
     );
 
-    await expect(storage.listMessages('broadcast')).resolves.toContainEqual(
+    await expect(storage.listMessages(message.conversationId)).resolves.toContainEqual(
       expect.objectContaining({ id: message.id, deliveryState: 'failed' })
     );
 

@@ -1,7 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises';
+import { existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it } from 'vitest';
+import Database from 'better-sqlite3';
 import { SqliteStorage } from './sqliteStorage';
 import { StorageError } from './types';
 
@@ -18,6 +20,55 @@ afterEach(async () => {
 });
 
 describe('SqliteStorage', () => {
+  it('keeps a stable identity within each room across restarts', async () => {
+    const storage = await createStorage();
+    const filePath = join(tempDirs[0], 'uchat.sqlite3');
+    const first = await storage.getOrCreateIdentity('room-one');
+    expect(statSync(filePath).mode & 0o777).toBe(0o600);
+    for (const sidecar of [`${filePath}-wal`, `${filePath}-shm`]) {
+      expect(existsSync(sidecar)).toBe(true);
+      expect(statSync(sidecar).mode & 0o777).toBe(0o600);
+    }
+    expect(await storage.getOrCreateIdentity('room-one')).toEqual(first);
+    expect((await storage.getOrCreateIdentity('room-two')).publicKey).not.toBe(first.publicKey);
+    await storage.close();
+
+    const reopened = new SqliteStorage(filePath);
+    expect(await reopened.getOrCreateIdentity('room-one')).toEqual(first);
+    await reopened.close();
+  });
+
+  it('migrates existing history without assigning it to a guessed room or sender', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'uchat-legacy-storage-'));
+    tempDirs.push(directory);
+    const filePath = join(directory, 'uchat.sqlite3');
+    const legacy = new Database(filePath);
+    legacy.exec(`
+      CREATE TABLE app_settings (id INTEGER PRIMARY KEY, profile_display_name TEXT NOT NULL,
+        profile_status TEXT NOT NULL, room_name TEXT, room_joined INTEGER NOT NULL,
+        udp_port INTEGER NOT NULL, tcp_port INTEGER NOT NULL);
+      INSERT INTO app_settings VALUES (1, 'Basil', 'available', 'Old room', 0, 47475, 47476);
+      CREATE TABLE conversations (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT NOT NULL,
+        peer_id TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      INSERT INTO conversations VALUES ('broadcast', 'broadcast', 'Broadcast room', NULL,
+        '2026-07-05T10:00:00.000Z', '2026-07-05T10:00:00.000Z');
+      CREATE TABLE messages (id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, body TEXT NOT NULL,
+        author TEXT NOT NULL, delivery_state TEXT NOT NULL, created_at TEXT NOT NULL);
+      INSERT INTO messages VALUES ('old-message', 'broadcast', 'saved text', 'peer', 'delivered',
+        '2026-07-05T10:00:00.000Z');
+    `);
+    legacy.close();
+
+    const migrated = new SqliteStorage(filePath);
+    expect(await migrated.listConversations()).toContainEqual(expect.objectContaining({
+      id: 'broadcast', roomId: undefined
+    }));
+    expect(await migrated.listMessages('broadcast')).toContainEqual(expect.objectContaining({
+      id: 'old-message', body: 'saved text', senderName: undefined
+    }));
+    await migrated.close();
+  });
+
   it('rejects malformed and oversized writes before touching SQLite', async () => {
     const storage = await createStorage();
 

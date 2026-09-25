@@ -43,11 +43,15 @@ Use this checklist before tagging a LAN-testable MVP build. It is Linux-first an
 - Discovery works without entering an IP address.
 - Direct and broadcast messages are delivered and show their delivery states.
 - Message history survives an app restart.
+- A peer keeps the same identity when rejoining the same room, and messages from another room stay in separate history.
+- Offline direct messages can be retried when the peer returns; interrupted sends become retryable after restart.
+- Broadcast messages identify their sender and report partial delivery without replaying automatically to later joiners.
 - A wrong passphrase does not discover or decrypt chat with the room.
 - Firewall failures show copyable `ufw allow` commands without changing firewall rules.
 
 ## Single-machine peer harness
 
+- Run `pnpm smoke:desktop release/linux-unpacked/uchat` after packaging; it checks the packaged UI, discovery, two-way messages, restart history, and wrong-passphrase isolation with a local simulator.
 - Run `pnpm peer:sim -- --room "Uchat Lab" --passphrase "demo" --web` alongside `pnpm dev`.
 - Confirm discovery, direct chat, acknowledgements, and the phone browser bridge.
 - Confirm the harness uses normal UDP/TCP sockets and does not modify firewall rules.

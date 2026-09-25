@@ -27,6 +27,8 @@ export interface Conversation {
   kind: ConversationKind;
   title: string;
   peerId?: string;
+  roomId?: string;
+  roomName?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -36,6 +38,8 @@ export interface ChatMessage {
   conversationId: string;
   body: string;
   author: 'local' | 'peer';
+  senderPeerId?: string;
+  senderName?: string;
   deliveryState: MessageDeliveryState;
   createdAt: string;
 }
@@ -49,6 +53,7 @@ export interface NetworkEvent {
 
 export interface RoomState {
   roomName: string | null;
+  roomId?: string;
   joined: boolean;
   udpPort: number;
   tcpPort: number;
@@ -64,6 +69,8 @@ export interface CreateConversationInput {
   kind: ConversationKind;
   title: string;
   peerId?: string;
+  roomId?: string;
+  roomName?: string;
 }
 
 export interface CreateMessageInput {
@@ -71,6 +78,8 @@ export interface CreateMessageInput {
   conversationId: string;
   body: string;
   author: ChatMessage['author'];
+  senderPeerId?: string;
+  senderName?: string;
   deliveryState?: MessageDeliveryState;
   createdAt?: string;
 }
@@ -107,6 +116,10 @@ export interface SendMessageInput {
   body: string;
 }
 
+export interface RetryMessageInput {
+  messageId: string;
+}
+
 export interface UchatAPI {
   getAppState(): Promise<UchatAppState>;
   setProfile(input: SetProfileInput): Promise<LocalProfile>;
@@ -114,6 +127,7 @@ export interface UchatAPI {
   listPeers(): Promise<Peer[]>;
   listConversations(): Promise<Conversation[]>;
   sendMessage(input: SendMessageInput): Promise<ChatMessage>;
+  retryMessage(input: RetryMessageInput): Promise<ChatMessage>;
   onPeerUpdated(callback: (peer: Peer) => void): () => void;
   onPeerRemoved(callback: (peerId: string) => void): () => void;
   onMessageReceived(callback: (message: ChatMessage) => void): () => void;

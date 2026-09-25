@@ -7,11 +7,12 @@ import type {
   NetworkEvent,
   Peer,
   SendMessageInput,
+  RetryMessageInput,
   SetProfileInput,
   UchatAPI,
   UchatAppState
 } from '@shared/types';
-import { parseJoinRoomInput, parseSendMessageInput, parseSetProfileInput } from '@shared/validation';
+import { parseJoinRoomInput, parseRetryMessageInput, parseSendMessageInput, parseSetProfileInput } from '@shared/validation';
 
 const on = <Payload>(channel: string, callback: (payload: Payload) => void): (() => void) => {
   const listener = (_event: Electron.IpcRendererEvent, payload: Payload): void => {
@@ -44,6 +45,8 @@ const uchat: UchatAPI = {
   listConversations: () => ipcRenderer.invoke(UCHAT_IPC.listConversations),
   sendMessage: (input) =>
     invokeValidated<SendMessageInput, ChatMessage>(UCHAT_IPC.sendMessage, input, parseSendMessageInput),
+  retryMessage: (input) =>
+    invokeValidated<RetryMessageInput, ChatMessage>(UCHAT_IPC.retryMessage, input, parseRetryMessageInput),
   onPeerUpdated: (callback) => on<Peer>(UCHAT_IPC.peerUpdated, callback),
   onPeerRemoved: (callback) => on<string>(UCHAT_IPC.peerRemoved, callback),
   onMessageReceived: (callback) => on<ChatMessage>(UCHAT_IPC.messageReceived, callback),

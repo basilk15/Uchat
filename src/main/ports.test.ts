@@ -25,9 +25,9 @@ const listenTcp = (): Promise<{ server: Server; port: number }> =>
     });
   });
 
-const listenUdp = (): Promise<{ socket: ReturnType<typeof createSocket>; port: number }> =>
+const listenUdp = (reuseAddr = false): Promise<{ socket: ReturnType<typeof createSocket>; port: number }> =>
   new Promise((resolve, reject) => {
-    const socket = createSocket({ type: 'udp4', reuseAddr: false });
+    const socket = createSocket({ type: 'udp4', reuseAddr });
 
     socket.once('error', reject);
     socket.bind(0, '127.0.0.1', () => {
@@ -96,6 +96,18 @@ describe('port availability helpers', () => {
         port,
         available: false,
         code: 'EADDRINUSE'
+      })
+    );
+  });
+
+  it('accepts a UDP port shared with another discovery peer', async () => {
+    const { port } = await listenUdp(true);
+
+    await expect(checkUdpPortAvailable(port, '127.0.0.1')).resolves.toEqual(
+      expect.objectContaining({
+        protocol: 'udp',
+        port,
+        available: true
       })
     );
   });

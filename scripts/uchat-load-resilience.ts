@@ -760,11 +760,14 @@ const runAppServiceScenarios = async (): Promise<ScenarioResult> => {
 
   try {
     harness.discovery.setPeers([toLivePeer(ackingPeer.peer)]);
+    const directConversationId = `direct-${room.fingerprint}-${ackingPeer.peer.id}`;
     await harness.storage.createConversation({
-      id: `direct-${ackingPeer.peer.id}`,
+      id: directConversationId,
       kind: 'direct',
       title: ackingPeer.peer.displayName,
-      peerId: ackingPeer.peer.id
+      peerId: ackingPeer.peer.id,
+      roomId: room.fingerprint,
+      roomName
     });
 
     const directMessages = 80;
@@ -772,14 +775,14 @@ const runAppServiceScenarios = async (): Promise<ScenarioResult> => {
 
     for (let index = 0; index < directMessages; index += 1) {
       await harness.service.sendMessage({
-        conversationId: `direct-${ackingPeer.peer.id}`,
+        conversationId: directConversationId,
         body: `direct throughput ${index + 1}`
       });
     }
 
     await waitUntil(
       async () =>
-        (await harness.storage.listMessages(`direct-${ackingPeer.peer.id}`)).filter(
+        (await harness.storage.listMessages(directConversationId)).filter(
           (message) => message.deliveryState === 'delivered'
         ).length === directMessages,
       8_000,
@@ -797,7 +800,7 @@ const runAppServiceScenarios = async (): Promise<ScenarioResult> => {
 
     await waitUntil(
       async () =>
-        (await harness.storage.listMessages('broadcast')).some((message) => message.id === broadcastSent.id),
+        (await harness.storage.listMessages(broadcastSent.conversationId)).some((message) => message.id === broadcastSent.id),
       3_000,
       'broadcast message persistence'
     );
@@ -805,7 +808,7 @@ const runAppServiceScenarios = async (): Promise<ScenarioResult> => {
     await wait(200);
 
     const broadcastState =
-      (await harness.storage.listMessages('broadcast')).find((message) => message.id === broadcastSent.id)?.deliveryState ??
+      (await harness.storage.listMessages(broadcastSent.conversationId)).find((message) => message.id === broadcastSent.id)?.deliveryState ??
       'missing';
 
     return {

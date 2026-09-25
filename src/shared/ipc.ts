@@ -5,6 +5,7 @@ export const UCHAT_IPC = {
   listPeers: 'uchat:list-peers',
   listConversations: 'uchat:list-conversations',
   sendMessage: 'uchat:send-message',
+  retryMessage: 'uchat:retry-message',
   peerUpdated: 'uchat:peer-updated',
   peerRemoved: 'uchat:peer-removed',
   messageReceived: 'uchat:message-received',

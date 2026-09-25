@@ -8,10 +8,11 @@ import type {
   NetworkEvent,
   Peer,
   SendMessageInput,
+  RetryMessageInput,
   SetProfileInput,
   UchatAppState
 } from '@shared/types';
-import { parseJoinRoomInput, parseSendMessageInput, parseSetProfileInput } from '@shared/validation';
+import { parseJoinRoomInput, parseRetryMessageInput, parseSendMessageInput, parseSetProfileInput } from '@shared/validation';
 import {
   CHAT_ACK_CONTENT_TYPE,
   CHAT_MESSAGE_CONTENT_TYPE,
@@ -27,7 +28,7 @@ import {
   type UdpDiscoveryServiceConfig,
   type UdpDiscoveryServiceEvents
 } from './discovery';
-import { deriveRoomKey, generateX25519Identity } from './security/crypto';
+import { deriveRoomKey } from './security/crypto';
 import type { UchatStorage } from './storage/types';
 import {
   TcpSessionManager,
@@ -55,6 +56,7 @@ export interface UchatAppService {
   listPeers(): Promise<Peer[]>;
   listConversations(): Promise<UchatAppState['conversations']>;
   sendMessage(input: SendMessageInput): Promise<ChatMessage>;
+  retryMessage(input: RetryMessageInput): Promise<ChatMessage>;
   cleanup(): Promise<void>;
 }
 
@@ -182,6 +184,7 @@ export const createUchatAppService = (
   let activeLocalPeer: DiscoveryPeerIdentity | null = null;
   const pendingDirectAcks = new Map<string, PendingDeliveryAcks>();
   const pendingBroadcastAcks = new Map<string, PendingDeliveryAcks>();
+  const retryInProgress = new Set<string>();
 
   const recordNetworkEvent = async (
     message: string,
@@ -194,6 +197,19 @@ export const createUchatAppService = (
 
   const reconcilePersistedRuntimeState = async (): Promise<void> => {
     const state = await storage.getAppState();
+
+    const interruptedMessages = state.messages.filter((message) =>
+      message.author === 'local' && (message.deliveryState === 'sending' || message.deliveryState === 'sent')
+    );
+    for (const message of interruptedMessages) {
+      await storage.updateMessageDeliveryState({ messageId: message.id, deliveryState: 'failed' });
+    }
+    if (interruptedMessages.length > 0) {
+      await recordNetworkEvent(
+        `${interruptedMessages.length} interrupted message${interruptedMessages.length === 1 ? '' : 's'} can be retried.`,
+        'warning'
+      );
+    }
 
     if (state.peers.length > 0) {
       await storage.clearPeers();
@@ -356,16 +372,28 @@ export const createUchatAppService = (
   const findOnlinePeer = async (peerId: string): Promise<Peer | null> =>
     (await listOnlineChatPeers()).find((peer) => peer.id === peerId) ?? null;
 
+  const requireRoomId = (): string => {
+    if (!activeLocalPeer) {
+      throw new Error('Join a room before sending messages.');
+    }
+    return activeLocalPeer.roomFingerprint;
+  };
+
   const ensureBroadcastConversation = async (): Promise<Conversation> => {
-    const existing = (await storage.listConversations()).find((conversation) => conversation.id === 'broadcast');
+    const roomId = requireRoomId();
+    const roomName = (await storage.getAppState()).room.roomName ?? 'Room';
+    const id = `broadcast-${roomId}`;
+    const existing = (await storage.listConversations()).find((conversation) => conversation.id === id);
     if (existing) {
       return existing;
     }
 
     return storage.createConversation({
-      id: 'broadcast',
+      id,
       kind: 'broadcast',
-      title: 'Broadcast room'
+      title: 'Broadcast room',
+      roomId,
+      roomName
     });
   };
 
@@ -373,30 +401,42 @@ export const createUchatAppService = (
     peerId: string,
     title: string
   ): Promise<Conversation> => {
+    const roomId = requireRoomId();
+    const roomName = (await storage.getAppState()).room.roomName ?? 'Room';
     const existing = (await storage.listConversations()).find(
-      (conversation) => conversation.kind === 'direct' && conversation.peerId === peerId
+      (conversation) => conversation.kind === 'direct' && conversation.peerId === peerId && conversation.roomId === roomId
     );
     if (existing) {
       return existing;
     }
 
     return storage.createConversation({
-      id: `${DIRECT_CONVERSATION_PREFIX}${peerId}`,
+      id: `${DIRECT_CONVERSATION_PREFIX}${roomId}-${peerId}`,
       kind: 'direct',
       title,
-      peerId
+      peerId,
+      roomId,
+      roomName
     });
   };
 
   const resolveSendConversation = async (conversationId: string): Promise<Conversation> => {
+    const roomId = requireRoomId();
+    if (conversationId === 'broadcast' || conversationId === `broadcast-${roomId}`) {
+      return ensureBroadcastConversation();
+    }
     const conversations = await storage.listConversations();
     const existing = conversations.find((conversation) => conversation.id === conversationId);
     if (existing) {
+      if (existing.roomId !== roomId) {
+        throw new Error('That conversation belongs to another room or archived history.');
+      }
       return existing;
     }
 
-    if (conversationId.startsWith(DIRECT_CONVERSATION_PREFIX)) {
-      const peerId = conversationId.slice(DIRECT_CONVERSATION_PREFIX.length);
+    const prefix = `${DIRECT_CONVERSATION_PREFIX}${roomId}-`;
+    if (conversationId.startsWith(prefix)) {
+      const peerId = conversationId.slice(prefix.length);
       const peer =
         (await getLivePeers()).find((current) => current.id === peerId) ??
         (await storage.listPeers()).find((current) => current.id === peerId);
@@ -636,6 +676,8 @@ export const createUchatAppService = (
         conversationId: conversation.id,
         body: validation.frame.body,
         author: 'peer',
+        senderPeerId: message.session.remotePeer.id,
+        senderName: message.session.remotePeer.displayName,
         deliveryState: 'delivered',
         createdAt: validation.frame.sentAt
       });
@@ -707,6 +749,106 @@ export const createUchatAppService = (
     }
   };
 
+  const deliverMessage = async (conversation: Conversation, message: ChatMessage): Promise<ChatMessage> => {
+    if (conversation.kind === 'broadcast') {
+      const peers = await listOnlineChatPeers();
+      if (peers.length === 0) {
+        const unsent = await updateDeliveryState(message.id, 'unsent');
+        await recordNetworkEvent(
+          'Broadcast message saved as unsent because no same-room peers are online.',
+          'warning'
+        );
+        return unsent ?? message;
+      }
+
+      pendingBroadcastAcks.set(message.id, {
+        expectedPeerIds: new Set(peers.map((peer) => peer.id)),
+        acknowledgedPeerIds: new Set(),
+        sendCompletedPeerIds: new Set(),
+        timer: null
+      });
+
+      const deliveries = await Promise.allSettled(
+        peers.map((peer) => sendChatMessageToPeer(peer, message, 'broadcast'))
+      );
+      const deliveredCount = deliveries.filter((delivery) => delivery.status === 'fulfilled').length;
+
+      if (deliveredCount === 0) {
+        removePendingDelivery(message.id);
+        const failed = await updateDeliveryState(message.id, 'failed');
+        await recordNetworkEvent('Broadcast message failed for all online peers.', 'error');
+        return failed ?? message;
+      }
+
+      if (deliveredCount < peers.length) {
+        removePendingDelivery(message.id);
+        const failed = await updateDeliveryState(message.id, 'failed');
+        await recordNetworkEvent(
+          `Broadcast message only reached ${deliveredCount}/${peers.length} online peers; full delivery is not guaranteed.`,
+          'error'
+        );
+        return failed ?? message;
+      }
+
+      const sent = await updateDeliveryState(message.id, 'sent');
+      const pending = pendingBroadcastAcks.get(message.id);
+      if (pending) {
+        for (const peer of peers) {
+          pending.sendCompletedPeerIds.add(peer.id);
+        }
+        startDeliveryAckTimeout(message.id, pending);
+        await completePendingDelivery(message.id, pending);
+      }
+
+      const current = await findStoredMessageConversation(message.id);
+      await recordNetworkEvent(`Broadcast message sent to ${deliveredCount}/${peers.length} online peers.`);
+      return current?.message ?? sent ?? message;
+    }
+
+    if (!conversation.peerId) {
+      const failed = await updateDeliveryState(message.id, 'failed');
+      await recordNetworkEvent('Direct message conversation is missing a peer id.', 'error');
+      return failed ?? message;
+    }
+
+    const peer = await findOnlinePeer(conversation.peerId);
+    if (!peer) {
+      const unsent = await updateDeliveryState(message.id, 'unsent');
+      await recordNetworkEvent('Direct message saved as unsent because the peer is offline.', 'warning');
+      return unsent ?? message;
+    }
+
+    const pendingDirect: PendingDeliveryAcks = {
+      expectedPeerIds: new Set([peer.id]),
+      acknowledgedPeerIds: new Set(),
+      sendCompletedPeerIds: new Set(),
+      timer: null
+    };
+    pendingDirectAcks.set(message.id, pendingDirect);
+
+    try {
+      await sendChatMessageToPeer(peer, message, 'direct');
+    } catch (error) {
+      removePendingDelivery(message.id, pendingDirect);
+      const failed = await updateDeliveryState(message.id, 'failed');
+      const errorMessage = error instanceof Error ? error.message : 'Unknown TCP send error.';
+      await recordNetworkEvent(`Failed to send direct message to ${peer.displayName}: ${errorMessage}`, 'error');
+      return failed ?? message;
+    }
+
+    const sent = await updateDeliveryState(message.id, 'sent');
+    const pending = pendingDirectAcks.get(message.id);
+    if (pending) {
+      pending.sendCompletedPeerIds.add(peer.id);
+      startDeliveryAckTimeout(message.id, pending);
+      await completePendingDelivery(message.id, pending);
+    }
+
+    const current = await findStoredMessageConversation(message.id);
+    await recordNetworkEvent(`Direct message sent to ${peer.displayName}.`);
+    return current?.message ?? sent ?? message;
+  };
+
   return {
     getAppState: () => afterStartup(getAppStateWithLivePeers),
 
@@ -733,10 +875,8 @@ export const createUchatAppService = (
         // replacement; other unavailable ports must fail before teardown.
         await checkRoomNetworking({ udpPort, tcpPort }, state.room);
 
-        const [roomKey, identity] = await Promise.all([
-          deriveRoomKey(roomName, normalizedInput.passphrase),
-          Promise.resolve(generateX25519Identity())
-        ]);
+        const roomKey = await deriveRoomKey(roomName, normalizedInput.passphrase);
+        const identity = await storage.getOrCreateIdentity(roomKey.fingerprint);
         const localPeer = createLocalDiscoveryPeer({
           id: identity.publicKey,
           displayName: state.profile.displayName,
@@ -813,6 +953,7 @@ export const createUchatAppService = (
           startupPhase = 'persisting';
           await storage.setRoom({
             roomName,
+            roomId: roomKey.fingerprint,
             joined: true,
             udpPort,
             tcpPort
@@ -822,6 +963,8 @@ export const createUchatAppService = (
           discoveryService = nextDiscoveryService;
           activeLocalPeer = localPeer;
           startupPhase = 'ready';
+
+          await ensureBroadcastConversation();
 
           await failPendingDeliveries('TCP sessions stopped before delivery was acknowledged.');
           await recordNetworkEvent(`Room "${roomName}" joined. UDP discovery and TCP listener started.`);
@@ -898,103 +1041,35 @@ export const createUchatAppService = (
           deliveryState: 'sending'
         });
 
-        if (conversation.kind === 'broadcast') {
-          const peers = await listOnlineChatPeers();
-          if (peers.length === 0) {
-            const unsent = await updateDeliveryState(message.id, 'unsent');
-            await recordNetworkEvent(
-              'Broadcast message saved as unsent because no same-room peers are online.',
-              'warning'
-            );
-            return unsent ?? message;
-          }
+        return deliverMessage(conversation, message);
+      });
+    },
 
-          pendingBroadcastAcks.set(message.id, {
-            expectedPeerIds: new Set(peers.map((peer) => peer.id)),
-            acknowledgedPeerIds: new Set(),
-            sendCompletedPeerIds: new Set(),
-            timer: null
-          });
-
-          const deliveries = await Promise.allSettled(
-            peers.map((peer) => sendChatMessageToPeer(peer, message, 'broadcast'))
-          );
-          const deliveredCount = deliveries.filter((delivery) => delivery.status === 'fulfilled').length;
-
-          if (deliveredCount === 0) {
-            removePendingDelivery(message.id);
-            const failed = await updateDeliveryState(message.id, 'failed');
-            await recordNetworkEvent('Broadcast message failed for all online peers.', 'error');
-            return failed ?? message;
-          }
-
-          if (deliveredCount < peers.length) {
-            removePendingDelivery(message.id);
-            const failed = await updateDeliveryState(message.id, 'failed');
-            await recordNetworkEvent(
-              `Broadcast message only reached ${deliveredCount}/${peers.length} online peers; full delivery is not guaranteed.`,
-              'error'
-            );
-            return failed ?? message;
-          }
-
-          const sent = await updateDeliveryState(message.id, 'sent');
-          const pending = pendingBroadcastAcks.get(message.id);
-          if (pending) {
-            for (const peer of peers) {
-              pending.sendCompletedPeerIds.add(peer.id);
-            }
-            startDeliveryAckTimeout(message.id, pending);
-            await completePendingDelivery(message.id, pending);
-          }
-
-          const current = await findStoredMessageConversation(message.id);
-          await recordNetworkEvent(`Broadcast message sent to ${deliveredCount}/${peers.length} online peers.`);
-          return current?.message ?? sent ?? message;
+    async retryMessage(input) {
+      const { messageId } = parseRetryMessageInput(input);
+      return afterStartup(async () => {
+        if (retryInProgress.has(messageId)) {
+          throw new Error('This message is already being retried.');
+        }
+        const stored = await findStoredMessageConversation(messageId);
+        if (!stored || stored.message.author !== 'local') {
+          throw new Error('Only saved local messages can be retried.');
+        }
+        if (stored.conversation.roomId !== requireRoomId()) {
+          throw new Error('Join the original room before retrying this message.');
+        }
+        if (stored.message.deliveryState !== 'failed' && stored.message.deliveryState !== 'unsent') {
+          throw new Error('Only failed or unsent messages can be retried.');
         }
 
-        if (!conversation.peerId) {
-          const failed = await updateDeliveryState(message.id, 'failed');
-          await recordNetworkEvent('Direct message conversation is missing a peer id.', 'error');
-          return failed ?? message;
-        }
-
-        const peer = await findOnlinePeer(conversation.peerId);
-        if (!peer) {
-          const unsent = await updateDeliveryState(message.id, 'unsent');
-          await recordNetworkEvent('Direct message saved as unsent because the peer is offline.', 'warning');
-          return unsent ?? message;
-        }
-
-        const pendingDirect: PendingDeliveryAcks = {
-          expectedPeerIds: new Set([peer.id]),
-          acknowledgedPeerIds: new Set(),
-          sendCompletedPeerIds: new Set(),
-          timer: null
-        };
-        pendingDirectAcks.set(message.id, pendingDirect);
-
+        retryInProgress.add(messageId);
         try {
-          await sendChatMessageToPeer(peer, message, 'direct');
-        } catch (error) {
-          removePendingDelivery(message.id, pendingDirect);
-          const failed = await updateDeliveryState(message.id, 'failed');
-          const errorMessage = error instanceof Error ? error.message : 'Unknown TCP send error.';
-          await recordNetworkEvent(`Failed to send direct message to ${peer.displayName}: ${errorMessage}`, 'error');
-          return failed ?? message;
+          const sending = await storage.updateMessageDeliveryState({ messageId, deliveryState: 'sending' });
+          options.onMessageReceived?.(sending);
+          return await deliverMessage(stored.conversation, sending);
+        } finally {
+          retryInProgress.delete(messageId);
         }
-
-        const sent = await updateDeliveryState(message.id, 'sent');
-        const pending = pendingDirectAcks.get(message.id);
-        if (pending) {
-          pending.sendCompletedPeerIds.add(peer.id);
-          startDeliveryAckTimeout(message.id, pending);
-          await completePendingDelivery(message.id, pending);
-        }
-
-        const current = await findStoredMessageConversation(message.id);
-        await recordNetworkEvent(`Direct message sent to ${peer.displayName}.`);
-        return current?.message ?? sent ?? message;
       });
     },
 

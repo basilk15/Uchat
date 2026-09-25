@@ -10,6 +10,7 @@ import type {
   UchatAppState,
   UpdateMessageDeliveryStateInput
 } from '@shared/types';
+import type { X25519Identity } from '../security/crypto';
 
 export interface AddNetworkEventInput {
   level?: NetworkEvent['level'];
@@ -20,6 +21,7 @@ export interface UchatStorage {
   getAppState(): Promise<UchatAppState>;
   setProfile(input: SetProfileInput): Promise<LocalProfile>;
   setRoom(input: RoomState): Promise<RoomState>;
+  getOrCreateIdentity(roomId: string): Promise<X25519Identity>;
   listPeers(): Promise<Peer[]>;
   upsertPeer(peer: Peer): Promise<Peer>;
   removePeer(peerId: string): Promise<boolean>;

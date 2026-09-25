@@ -84,7 +84,9 @@ export const checkUdpPortAvailable = async (port: number, host?: string): Promis
   const normalizedPort = normalizePort(port, 'UDP port');
 
   return new Promise((resolve) => {
-    const socket = createSocket({ type: 'udp4', reuseAddr: false });
+    // Discovery shares its UDP port with other peers on the same host.
+    // Probe using the same socket option that discovery uses when it starts.
+    const socket = createSocket({ type: 'udp4', reuseAddr: true });
     let settled = false;
 
     socket.unref();

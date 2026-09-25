@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { FormEvent } from 'react';
 import { DEFAULT_DISCOVERY_PORT, DEFAULT_TCP_PORT } from '@shared/defaults';
 import { createCopyableUfwAllowScript, createUfwAllowCommands } from '@shared/firewall';
@@ -22,13 +22,16 @@ import type {
 } from '@shared/types';
 
 const now = new Date('2026-07-05T10:30:00.000Z').toISOString();
+const THEME_STORAGE_KEY = 'uchat-theme';
 
-const deliveryStateRank: Record<ChatMessage['deliveryState'], number> = {
-  unsent: 0,
-  sending: 1,
-  sent: 2,
-  failed: 3,
-  delivered: 4
+type AppTheme = 'light' | 'dark';
+
+const readThemePreference = (): AppTheme => {
+  try {
+    return window.localStorage.getItem(THEME_STORAGE_KEY) === 'dark' ? 'dark' : 'light';
+  } catch {
+    return 'light';
+  }
 };
 
 const formatTime = (value: string): string =>
@@ -92,21 +95,13 @@ const mergeById = <T extends { id: string }>(items: T[]): T[] => {
 };
 
 const mergeMessage = (existing: ChatMessage, incoming: ChatMessage): ChatMessage => {
-  const existingRank = deliveryStateRank[existing.deliveryState];
-  const incomingRank = deliveryStateRank[incoming.deliveryState];
-
-  if (existingRank > incomingRank) {
+  if (existing.deliveryState === 'delivered' && incoming.deliveryState !== 'delivered') {
     return existing;
   }
-
-  if (existingRank === incomingRank && existing.createdAt > incoming.createdAt) {
-    return existing;
-  }
-
   return incoming;
 };
 
-const mergeMessages = (items: ChatMessage[]): ChatMessage[] => {
+export const mergeMessages = (items: ChatMessage[]): ChatMessage[] => {
   const byId = new Map<string, ChatMessage>();
 
   items.forEach((item) => {
@@ -117,42 +112,48 @@ const mergeMessages = (items: ChatMessage[]): ChatMessage[] => {
   return Array.from(byId.values()).sort((left, right) => left.createdAt.localeCompare(right.createdAt));
 };
 
-const buildConversations = (base: Conversation[], peers: Peer[]): Conversation[] => {
+export const buildConversations = (
+  base: Conversation[],
+  peers: Peer[],
+  roomId: string | undefined,
+  roomName: string | null,
+  messages: ChatMessage[]
+): Conversation[] => {
   const createdAt = now;
+  const broadcastId = roomId ? `broadcast-${roomId}` : 'broadcast';
   const broadcast =
-    base.find((conversation) => conversation.id === 'broadcast') ??
+    base.find((conversation) => conversation.id === broadcastId) ??
     ({
-      id: 'broadcast',
+      id: broadcastId,
       kind: 'broadcast',
       title: 'Broadcast room',
+      roomId,
+      roomName: roomName ?? undefined,
       createdAt,
       updatedAt: createdAt
     } satisfies Conversation);
 
-  const directConversations = peers.map(
+  const onlineConversations = peers.map(
     (peer): Conversation => ({
-      id: `direct-${peer.id}`,
+      id: `direct-${roomId}-${peer.id}`,
       kind: 'direct',
       title: peer.displayName,
       peerId: peer.id,
+      roomId,
+      roomName: roomName ?? undefined,
       createdAt,
       updatedAt: peer.lastSeenAt
     })
   );
 
-  return mergeById([broadcast, ...base.filter((conversation) => conversation.id !== 'broadcast'), ...directConversations]);
+  const savedDirect = base.filter((conversation) => conversation.kind === 'direct' && conversation.roomId === roomId);
+  const archived = base.filter((conversation) =>
+    conversation.roomId !== roomId && messages.some((message) => message.conversationId === conversation.id)
+  );
+  return mergeById([broadcast, ...savedDirect, ...onlineConversations, ...archived]);
 };
 
 const removePeerById = (peers: Peer[], peerId: string): Peer[] => peers.filter((peer) => peer.id !== peerId);
-
-const createLocalMessage = (conversationId: string, body: string): ChatMessage => ({
-  id: `local-${Date.now()}`,
-  conversationId,
-  body,
-  author: 'local',
-  deliveryState: 'unsent',
-  createdAt: new Date().toISOString()
-});
 
 const formatUnknownError = (error: unknown): string =>
   error instanceof Error ? error.message : 'Unknown renderer boot error.';
@@ -176,9 +177,49 @@ const isReliabilityEvent = (event: NetworkEvent): boolean => {
   );
 };
 
+interface MessageBubbleProps {
+  message: ChatMessage;
+  canSend: boolean;
+  archived: boolean;
+  peerOnline: boolean;
+  retrying: boolean;
+  onRetry: () => void;
+  onCopy: () => void;
+}
+
+export const MessageBubble = ({
+  message, canSend, archived, peerOnline, retrying, onRetry, onCopy
+}: MessageBubbleProps): React.JSX.Element => (
+  <article className={`message ${message.author}`}>
+    <div className="message-bubble">
+      {message.author === 'peer' ? (
+        <strong className="message-sender">{message.senderName ?? 'Unknown peer'}</strong>
+      ) : null}
+      <p>{message.body}</p>
+      <footer>
+        <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
+        {message.author === 'local' ? <span>{message.deliveryState}</span> : null}
+      </footer>
+      {message.author === 'local' &&
+        (message.deliveryState === 'failed' || message.deliveryState === 'unsent') &&
+        canSend ? (
+          <button className="message-retry" type="button" disabled={retrying || !peerOnline} onClick={onRetry}>
+            {retrying ? 'Retrying…' : 'Retry send'}
+          </button>
+        ) : null}
+      {message.author === 'local' &&
+        (message.deliveryState === 'failed' || message.deliveryState === 'unsent') &&
+        archived ? (
+          <button className="message-retry" type="button" onClick={onCopy}>Copy message</button>
+        ) : null}
+    </div>
+  </article>
+);
+
 type ResponsivePanel = 'conversations' | 'details' | null;
 
 export const App = (): React.JSX.Element => {
+  const [theme, setTheme] = useState<AppTheme>(readThemePreference);
   const [state, setState] = useState<UchatAppState | null>(null);
   const [events, setEvents] = useState<NetworkEvent[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -192,6 +233,7 @@ export const App = (): React.JSX.Element => {
   const [tcpPortDraft, setTcpPortDraft] = useState(DEFAULT_PORT_DRAFT.tcpPort);
   const [portErrors, setPortErrors] = useState<PortDraftErrors>({});
   const [sendState, setSendState] = useState('');
+  const [retryingMessageId, setRetryingMessageId] = useState<string | null>(null);
   const [copyState, setCopyState] = useState('');
   const [roomState, setRoomState] = useState('Not connected');
   const [bootIssue, setBootIssue] = useState<string | null>(null);
@@ -204,6 +246,16 @@ export const App = (): React.JSX.Element => {
   const conversationsCloseRef = useRef<HTMLButtonElement | null>(null);
   const detailsCloseRef = useRef<HTMLButtonElement | null>(null);
   const previousPanelRef = useRef<ResponsivePanel>(null);
+
+  useLayoutEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    document.documentElement.style.colorScheme = theme;
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+    } catch {
+      // The toggle still works for this session if persistent storage is unavailable.
+    }
+  }, [theme]);
 
   useEffect(() => {
     if (responsivePanel === 'conversations') {
@@ -305,6 +357,11 @@ export const App = (): React.JSX.Element => {
 
     const unsubscribeMessage = api.onMessageReceived((message) => {
       setMessages((current) => mergeMessages([...current, message]));
+      void api.listConversations().then((conversations) => {
+        if (mounted) {
+          setState((current) => current ? { ...current, conversations } : current);
+        }
+      }).catch(() => undefined);
     });
 
     const unsubscribeEvent = api.onNetworkEvent((event) => {
@@ -322,11 +379,20 @@ export const App = (): React.JSX.Element => {
 
   const peers = useMemo(() => state?.peers ?? [], [state?.peers]);
   const conversations = useMemo(
-    () => buildConversations(state?.conversations ?? [], peers),
-    [peers, state?.conversations]
+    () => buildConversations(state?.conversations ?? [], peers, state?.room.roomId, state?.room.roomName ?? null, messages),
+    [peers, state?.conversations, state?.room.roomId, state?.room.roomName, messages]
   );
   const activeConversation = conversations.find((conversation) => conversation.id === activeConversationId) ?? conversations[0];
-  const selectedPeer = activeConversation?.peerId
+  const currentBroadcast = conversations.find((conversation) =>
+    conversation.kind === 'broadcast' && conversation.roomId === state?.room.roomId
+  );
+  const savedDirectConversations = conversations.filter((conversation) => conversation.kind === 'direct');
+  const archivedBroadcasts = conversations.filter((conversation) =>
+    conversation.kind === 'broadcast' && conversation.id !== currentBroadcast?.id
+  );
+  const activeConversationArchived = activeConversation?.roomId !== state?.room.roomId;
+  const canSend = Boolean(state?.room.joined && activeConversation && !activeConversationArchived);
+  const selectedPeer = activeConversation?.peerId && !activeConversationArchived
     ? peers.find((peer) => peer.id === activeConversation.peerId)
     : undefined;
   const directConversationOffline = activeConversation?.kind === 'direct' && !selectedPeer;
@@ -438,7 +504,7 @@ export const App = (): React.JSX.Element => {
       setPortErrors({});
       setRoomState('Connected');
       setPassphraseSubmitted(true);
-      setActiveConversationId('broadcast');
+      setActiveConversationId(`broadcast-${nextState.room.roomId}`);
       setRoomSettingsOpen(false);
       setResponsivePanel(null);
       setBootIssue(null);
@@ -480,9 +546,9 @@ export const App = (): React.JSX.Element => {
     setSendState('Sending…');
 
     if (!window.uchat) {
-      setMessages((current) => [...current, createLocalMessage(activeConversation.id, body)]);
-      setSendState('Saved locally');
-      setBootIssue('Message stayed local to this renderer session because preload API is unavailable.');
+      setDraft(body);
+      setSendState('Not sent');
+      setBootIssue('Message could not be sent because the app connection is unavailable.');
       return;
     }
 
@@ -492,12 +558,44 @@ export const App = (): React.JSX.Element => {
         body
       });
       setMessages((current) => mergeMessages([...current, sent]));
-      setSendState(sent.deliveryState === 'delivered' ? 'Delivered' : 'Sent');
+      void window.uchat.listConversations().then((conversations) => {
+        setState((current) => current ? { ...current, conversations } : current);
+      }).catch(() => undefined);
+      setSendState(sent.deliveryState);
       setBootIssue(null);
     } catch (error) {
-      setMessages((current) => [...current, createLocalMessage(activeConversation.id, body)]);
-      setSendState('Saved locally');
-      setBootIssue(`Message kept in local UI state: ${formatUnknownError(error)}`);
+      setDraft(body);
+      setSendState('Not sent');
+      setBootIssue(`Could not send message: ${formatUnknownError(error)}`);
+    }
+  };
+
+  const handleRetryMessage = async (messageId: string): Promise<void> => {
+    if (!window.uchat) {
+      setBootIssue('Message could not be retried because the app connection is unavailable.');
+      return;
+    }
+    setRetryingMessageId(messageId);
+    setSendState('Retrying…');
+    try {
+      const retried = await window.uchat.retryMessage({ messageId });
+      setMessages((current) => mergeMessages([...current, retried]));
+      setSendState(retried.deliveryState);
+      setBootIssue(null);
+    } catch (error) {
+      setSendState('Retry failed');
+      setBootIssue(`Could not retry message: ${formatUnknownError(error)}`);
+    } finally {
+      setRetryingMessageId(null);
+    }
+  };
+
+  const handleCopyMessage = async (body: string): Promise<void> => {
+    try {
+      await navigator.clipboard.writeText(body);
+      setSendState('Message copied');
+    } catch {
+      setBootIssue('Could not copy the message. You can select its text instead.');
     }
   };
 
@@ -575,12 +673,12 @@ export const App = (): React.JSX.Element => {
 
           <button
             className={`conversation-row broadcast-row ${
-              activeConversation?.id === 'broadcast' ? 'selected' : ''
+              activeConversation?.id === currentBroadcast?.id ? 'selected' : ''
             }`}
             type="button"
-            aria-pressed={activeConversation?.id === 'broadcast'}
+            aria-pressed={activeConversation?.id === currentBroadcast?.id}
             onClick={() => {
-              setActiveConversationId('broadcast');
+              setActiveConversationId(currentBroadcast?.id ?? 'broadcast');
               setResponsivePanel(null);
               setRoomSettingsOpen(false);
             }}
@@ -594,37 +692,62 @@ export const App = (): React.JSX.Element => {
             </span>
           </button>
 
-          {peers.length > 0 ? (
-            peers.map((peer) => (
-              <button
-                className={`conversation-row ${activeConversation?.peerId === peer.id ? 'selected' : ''}`}
-                type="button"
-                key={peer.id}
-                aria-pressed={activeConversation?.peerId === peer.id}
-                onClick={() => {
-                  setActiveConversationId(`direct-${peer.id}`);
-                  setResponsivePanel(null);
-                  setRoomSettingsOpen(false);
-                }}
-              >
-                <span className="avatar small" aria-hidden="true">
-                  {getInitials(peer.displayName)}
-                </span>
-                <span>
-                  <strong>{peer.displayName}</strong>
-                  <small>
-                    <span className={`presence-dot ${peer.status}`} aria-hidden="true" />
-                    {peer.status === 'available' ? 'Available' : peer.status}
-                  </small>
-                </span>
-              </button>
-            ))
+          {savedDirectConversations.length > 0 ? (
+            savedDirectConversations.map((conversation) => {
+              const peer = conversation.roomId === state?.room.roomId
+                ? peers.find((item) => item.id === conversation.peerId)
+                : undefined;
+              return (
+                <button
+                  className={`conversation-row ${activeConversation?.id === conversation.id ? 'selected' : ''}`}
+                  type="button"
+                  key={conversation.id}
+                  aria-pressed={activeConversation?.id === conversation.id}
+                  onClick={() => {
+                    setActiveConversationId(conversation.id);
+                    setResponsivePanel(null);
+                    setRoomSettingsOpen(false);
+                  }}
+                >
+                  <span className="avatar small" aria-hidden="true">
+                    {getInitials(conversation.title)}
+                  </span>
+                  <span>
+                    <strong>{conversation.title}</strong>
+                    <small>
+                      {peer ? <span className={`presence-dot ${peer.status}`} aria-hidden="true" /> : null}
+                      {conversation.roomId !== state?.room.roomId
+                        ? `Earlier room: ${conversation.roomName ?? 'unknown'}`
+                        : peer ? (peer.status === 'available' ? 'Available' : peer.status) : 'Offline'}
+                    </small>
+                  </span>
+                </button>
+              );
+            })
           ) : (
             <div className="empty-list">
               <strong>{roomJoined ? 'No one nearby yet' : 'Your people will show up here'}</strong>
               <span>{roomJoined ? 'When someone joins this room, they’ll appear here.' : 'Join a room to find people on your local network.'}</span>
             </div>
           )}
+          {archivedBroadcasts.map((conversation) => (
+            <button
+              className={`conversation-row broadcast-row ${activeConversation?.id === conversation.id ? 'selected' : ''}`}
+              type="button"
+              key={conversation.id}
+              aria-pressed={activeConversation?.id === conversation.id}
+              onClick={() => {
+                setActiveConversationId(conversation.id);
+                setResponsivePanel(null);
+              }}
+            >
+              <span className="room-glyph" aria-hidden="true">#</span>
+              <span>
+                <strong>{conversation.roomName ?? 'Earlier history'}</strong>
+                <small>Saved broadcast history</small>
+              </span>
+            </button>
+          ))}
         </nav>
 
         <form className={`profile-card${profileEditorOpen ? ' editing' : ''}`} aria-label="Your profile" onSubmit={handleProfileSubmit}>
@@ -692,6 +815,20 @@ export const App = (): React.JSX.Element => {
               </div>
             </>
           )}
+          <button
+            className="theme-toggle"
+            type="button"
+            role="switch"
+            aria-label="Dark theme"
+            aria-checked={theme === 'dark'}
+            onClick={() => setTheme((current) => current === 'dark' ? 'light' : 'dark')}
+          >
+            <svg viewBox="0 0 20 20" aria-hidden="true">
+              <path d="M17.1 12.8A7.7 7.7 0 0 1 7.2 2.9 7.8 7.8 0 1 0 17.1 12.8Z" />
+            </svg>
+            <span>Dark theme</span>
+            <span className="theme-switch-track" aria-hidden="true"><span /></span>
+          </button>
         </form>
       </aside>
 
@@ -735,8 +872,12 @@ export const App = (): React.JSX.Element => {
             <p>
               {selectedPeer
                 ? `${selectedPeer.address} / TCP ${selectedPeer.tcpPort}`
+                : activeConversationArchived
+                  ? activeConversation?.roomId
+                    ? `Saved history from ${activeConversation.roomName ?? 'another room'} — join that room to send.`
+                    : 'Earlier history has no saved room identity. Copy a message into a current chat to resend it.'
                 : directConversationOffline
-                  ? 'Peer offline — messages will be saved as unsent until they return.'
+                  ? 'Peer offline — retry unsent messages when they return.'
                   : !roomJoined
                     ? 'Connect to a room to start chatting.'
                     : peers.length === 0
@@ -748,7 +889,7 @@ export const App = (): React.JSX.Element => {
         </header>
 
         <div className="message-history" aria-label="Message history" aria-live="polite">
-          {!roomJoined ? (
+          {!roomJoined && visibleMessages.length === 0 ? (
             <section className="welcome-state" aria-labelledby="welcome-title">
               <div className="network-illustration" aria-hidden="true">
                 <svg viewBox="0 0 220 170" fill="none">
@@ -796,15 +937,15 @@ export const App = (): React.JSX.Element => {
                       <span>{formatConversationDay(message.createdAt)}</span>
                     </div>
                   ) : null}
-                  <article className={`message ${message.author}`}>
-                    <div className="message-bubble">
-                      <p>{message.body}</p>
-                      <footer>
-                        <time dateTime={message.createdAt}>{formatTime(message.createdAt)}</time>
-                        <span>{message.deliveryState}</span>
-                      </footer>
-                    </div>
-                  </article>
+                  <MessageBubble
+                    message={message}
+                    canSend={canSend}
+                    archived={activeConversationArchived}
+                    peerOnline={!activeConversation?.peerId || Boolean(selectedPeer)}
+                    retrying={retryingMessageId === message.id}
+                    onRetry={() => void handleRetryMessage(message.id)}
+                    onCopy={() => void handleCopyMessage(message.body)}
+                  />
                 </Fragment>
               );
             })
@@ -817,7 +958,7 @@ export const App = (): React.JSX.Element => {
           )}
         </div>
 
-        {roomJoined ? (
+        {canSend ? (
           <form className="composer" onSubmit={handleSend}>
             <textarea
               aria-label="Message"

@@ -14,6 +14,7 @@
     "dist:linux": "pnpm build && electron-builder --linux AppImage dir",
     "postinstall": "node scripts/rebuild-sqlite-electron.cjs",
     "peer:sim": "tsx scripts/uchat-peer-sim.ts",
+    "smoke:desktop": "tsx scripts/desktop-smoke.ts",
     "rebuild:sqlite-electron": "node scripts/rebuild-sqlite-electron.cjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

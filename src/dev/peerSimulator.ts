@@ -67,6 +67,7 @@ export interface PeerSimulatorState {
   tcpPort: number;
   httpPort: number | null;
   lanInterfaces: ReturnType<typeof getUsableLanInterfaces>;
+  lanUrls: string[];
   knownPeers: Peer[];
   connectedPeers: Peer[];
   logEntries: PeerSimulatorLogEntry[];
@@ -506,7 +507,6 @@ const renderShell = (): string => `<!doctype html>
 
         const payload = {
           body,
-          scope,
           targetPeerId: targetPeer.value || undefined
         };
 
@@ -908,6 +908,7 @@ export const createPeerSimulator = (options: PeerSimulatorOptions): PeerSimulato
       tcpPort: localPeer.tcpPort,
       httpPort,
       lanInterfaces,
+      lanUrls: httpPort ? buildBrowserUrls(httpPort, lanInterfaces).slice(1) : [],
       knownPeers: Array.from(knownPeers.values()),
       connectedPeers,
       logEntries: [...logEntries]

@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain } from 'electron';
 import { join } from 'node:path';
 import { UCHAT_IPC } from '@shared/ipc';
 import type { ChatMessage, NetworkEvent, Peer } from '@shared/types';
-import { parseJoinRoomInput, parseSendMessageInput, parseSetProfileInput } from '@shared/validation';
+import { parseJoinRoomInput, parseRetryMessageInput, parseSendMessageInput, parseSetProfileInput } from '@shared/validation';
 import { createUchatAppService, type UchatAppService } from './appService';
 import { createSqliteStorage } from './storage/sqliteStorage';
 import { resolveRendererUrlToLoad } from './rendererUrl';
@@ -95,6 +95,9 @@ const registerIpcHandlers = (service: UchatAppService): void => {
 
   ipcMain.handle(UCHAT_IPC.sendMessage, (_event, input: unknown) =>
     service.sendMessage(parseSendMessageInput(input))
+  );
+  ipcMain.handle(UCHAT_IPC.retryMessage, (_event, input: unknown) =>
+    service.retryMessage(parseRetryMessageInput(input))
   );
 };
 

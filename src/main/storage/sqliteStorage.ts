@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { canTransitionDeliveryState, isMessageDeliveryState } from '@shared/domain';
 import { createInitialAppState } from '@shared/defaults';
@@ -28,15 +28,18 @@ import {
   parseSetProfileInput,
   parseUpdateMessageDeliveryStateInput,
   normalizeTimestamp,
+  normalizeText,
   isBoundedString,
   VALIDATION_LIMITS
 } from '@shared/validation';
 import { StorageError, type AddNetworkEventInput, type UchatStorage } from './types';
+import { generateX25519Identity, type X25519Identity } from '../security/crypto';
 
 interface SettingsRow {
   profile_display_name: string;
   profile_status: PresenceStatus;
   room_name: string | null;
+  room_id: string | null;
   room_joined: 0 | 1;
   udp_port: number;
   tcp_port: number;
@@ -60,6 +63,8 @@ interface ConversationRow {
   kind: Conversation['kind'];
   title: string;
   peer_id: string | null;
+  room_id: string | null;
+  room_name: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -69,6 +74,8 @@ interface MessageRow {
   conversation_id: string;
   body: string;
   author: ChatMessage['author'];
+  sender_peer_id: string | null;
+  sender_name: string | null;
   delivery_state: MessageDeliveryState;
   created_at: string;
 }
@@ -123,7 +130,9 @@ const toConversation = (row: ConversationRow): Conversation => {
     id: row.id,
     kind: row.kind,
     title: row.title,
-    peerId: row.peer_id ?? undefined
+    peerId: row.peer_id ?? undefined,
+    roomId: row.room_id ?? undefined,
+    roomName: row.room_name ?? undefined
   });
 
   return {
@@ -131,6 +140,8 @@ const toConversation = (row: ConversationRow): Conversation => {
     kind: conversation.kind,
     title: conversation.title,
     peerId: conversation.peerId,
+    roomId: conversation.roomId,
+    roomName: conversation.roomName,
     createdAt: normalizeTimestamp(row.created_at, 'createdAt'),
     updatedAt: normalizeTimestamp(row.updated_at, 'updatedAt')
   };
@@ -142,6 +153,8 @@ const toMessage = (row: MessageRow): ChatMessage => {
     conversationId: row.conversation_id,
     body: row.body,
     author: row.author,
+    senderPeerId: row.sender_peer_id ?? undefined,
+    senderName: row.sender_name ?? undefined,
     deliveryState: row.delivery_state,
     createdAt: row.created_at
   });
@@ -155,6 +168,8 @@ const toMessage = (row: MessageRow): ChatMessage => {
     conversationId: message.conversationId,
     body: message.body,
     author: message.author,
+    senderPeerId: message.senderPeerId,
+    senderName: message.senderName,
     deliveryState: message.deliveryState,
     createdAt: message.createdAt as string
   };
@@ -169,6 +184,7 @@ const toNetworkEvent = (row: NetworkEventRow): NetworkEvent => ({
 const toRoom = (row: SettingsRow): RoomState =>
   parseRoomState({
     roomName: row.room_name,
+    roomId: row.room_id ?? undefined,
     joined: row.room_joined === 1,
     udpPort: row.udp_port,
     tcpPort: row.tcp_port
@@ -203,10 +219,16 @@ export class SqliteStorage implements UchatStorage {
   readonly #db: Database.Database;
 
   constructor(filePath: string) {
-    mkdirSync(dirname(filePath), { recursive: true });
+    mkdirSync(dirname(filePath), { recursive: true, mode: 0o700 });
     const nativeBinding = resolveElectronNativeBinding();
     this.#db = new Database(filePath, nativeBinding ? { nativeBinding } : undefined);
+    chmodSync(filePath, 0o600);
     this.#db.pragma('journal_mode = WAL');
+    for (const sidecar of [`${filePath}-wal`, `${filePath}-shm`]) {
+      if (existsSync(sidecar)) {
+        chmodSync(sidecar, 0o600);
+      }
+    }
     this.#db.pragma('foreign_keys = ON');
     this.#migrate();
   }
@@ -239,14 +261,33 @@ export class SqliteStorage implements UchatStorage {
   async setRoom(input: RoomState): Promise<RoomState> {
     const normalizedInput = parseRoomState(input);
     this.#db
-      .prepare('UPDATE app_settings SET room_name = ?, room_joined = ?, udp_port = ?, tcp_port = ? WHERE id = 1')
+      .prepare('UPDATE app_settings SET room_name = ?, room_id = ?, room_joined = ?, udp_port = ?, tcp_port = ? WHERE id = 1')
       .run(
         normalizedInput.roomName,
+        normalizedInput.roomId ?? null,
         normalizedInput.joined ? 1 : 0,
         normalizedInput.udpPort,
         normalizedInput.tcpPort
       );
     return normalizedInput;
+  }
+
+  async getOrCreateIdentity(roomId: string): Promise<X25519Identity> {
+    const normalizedRoomId = normalizeText(roomId, 'roomId', VALIDATION_LIMITS.roomFingerprint);
+    return this.#db.transaction(() => {
+      const existing = this.#db.prepare('SELECT public_key, private_key FROM local_identity WHERE room_id = ?')
+        .get(normalizedRoomId) as
+        | { public_key: string; private_key: string }
+        | undefined;
+      if (existing) {
+        return { publicKey: existing.public_key, privateKey: existing.private_key };
+      }
+
+      const identity = generateX25519Identity();
+      this.#db.prepare('INSERT INTO local_identity (room_id, public_key, private_key) VALUES (?, ?, ?)')
+        .run(normalizedRoomId, identity.publicKey, identity.privateKey);
+      return identity;
+    })();
   }
 
   async listPeers(): Promise<Peer[]> {
@@ -316,6 +357,8 @@ export class SqliteStorage implements UchatStorage {
       kind: normalizedInput.kind,
       title: normalizedInput.title,
       peerId: normalizedInput.peerId,
+      roomId: normalizedInput.roomId,
+      roomName: normalizedInput.roomName,
       createdAt: now,
       updatedAt: now
     };
@@ -327,14 +370,16 @@ export class SqliteStorage implements UchatStorage {
 
     this.#db
       .prepare(
-        `INSERT INTO conversations (id, kind, title, peer_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
+        `INSERT INTO conversations (id, kind, title, peer_id, room_id, room_name, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
       )
       .run(
         conversation.id,
         conversation.kind,
         conversation.title,
         conversation.peerId ?? null,
+        conversation.roomId ?? null,
+        conversation.roomName ?? null,
         conversation.createdAt,
         conversation.updatedAt
       );
@@ -366,6 +411,8 @@ export class SqliteStorage implements UchatStorage {
         conversationId: normalizedInput.conversationId,
         body: normalizedInput.body,
         author: normalizedInput.author,
+        senderPeerId: normalizedInput.senderPeerId,
+        senderName: normalizedInput.senderName,
         deliveryState: normalizedInput.deliveryState ?? 'sending',
         createdAt
       };
@@ -377,10 +424,11 @@ export class SqliteStorage implements UchatStorage {
 
       this.#db
         .prepare(
-          `INSERT INTO messages (id, conversation_id, body, author, delivery_state, created_at)
-           VALUES (?, ?, ?, ?, ?, ?)`
+          `INSERT INTO messages (id, conversation_id, body, author, sender_peer_id, sender_name, delivery_state, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
         )
-        .run(message.id, message.conversationId, message.body, message.author, message.deliveryState, message.createdAt);
+        .run(message.id, message.conversationId, message.body, message.author, message.senderPeerId ?? null,
+          message.senderName ?? null, message.deliveryState, message.createdAt);
       this.#db
         .prepare('UPDATE conversations SET updated_at = ? WHERE id = ?')
         .run(createdAt, normalizedInput.conversationId);
@@ -468,6 +516,7 @@ export class SqliteStorage implements UchatStorage {
           profile_display_name TEXT NOT NULL,
           profile_status TEXT NOT NULL,
           room_name TEXT,
+          room_id TEXT,
           room_joined INTEGER NOT NULL CHECK (room_joined IN (0, 1)),
           udp_port INTEGER NOT NULL,
           tcp_port INTEGER NOT NULL
@@ -491,6 +540,8 @@ export class SqliteStorage implements UchatStorage {
           kind TEXT NOT NULL,
           title TEXT NOT NULL,
           peer_id TEXT,
+          room_id TEXT,
+          room_name TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -500,6 +551,8 @@ export class SqliteStorage implements UchatStorage {
           conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
           body TEXT NOT NULL,
           author TEXT NOT NULL,
+          sender_peer_id TEXT,
+          sender_name TEXT,
           delivery_state TEXT NOT NULL,
           created_at TEXT NOT NULL
         );
@@ -511,14 +564,32 @@ export class SqliteStorage implements UchatStorage {
           created_at TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS local_identity (
+          room_id TEXT PRIMARY KEY,
+          public_key TEXT NOT NULL,
+          private_key TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_peers_last_seen_at ON peers(last_seen_at);
         CREATE INDEX IF NOT EXISTS idx_conversations_peer_id ON conversations(peer_id);
         CREATE INDEX IF NOT EXISTS idx_messages_conversation_created_at ON messages(conversation_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_network_events_created_at ON network_events(created_at);
       `);
 
+      const addColumnIfMissing = (table: string, column: string): void => {
+        const columns = this.#db.pragma(`table_info(${table})`) as Array<{ name: string }>;
+        if (!columns.some((entry) => entry.name === column)) {
+          this.#db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} TEXT`);
+        }
+      };
+      addColumnIfMissing('app_settings', 'room_id');
+      addColumnIfMissing('conversations', 'room_id');
+      addColumnIfMissing('conversations', 'room_name');
+      addColumnIfMissing('messages', 'sender_peer_id');
+      addColumnIfMissing('messages', 'sender_name');
+
       this.#seedDefaults();
-      this.#db.pragma('user_version = 1');
+      this.#db.pragma('user_version = 2');
     });
 
     migrate();

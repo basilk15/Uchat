@@ -10,6 +10,7 @@ import type {
   Peer,
   PresenceStatus,
   RoomState,
+  RetryMessageInput,
   SendMessageInput,
   SetProfileInput,
   UpdateMessageDeliveryStateInput
@@ -285,6 +286,14 @@ export const parseSendMessageInput = (value: unknown): SendMessageInput => {
   };
 };
 
+export const parseRetryMessageInput = (value: unknown): RetryMessageInput => {
+  const input = assertInputRecord(value, 'retryMessage');
+  assertKnownKeys(input, 'retryMessage', ['messageId']);
+  return {
+    messageId: normalizeText(requiredValue(input, 'retryMessage', 'messageId'), 'messageId', VALIDATION_LIMITS.identifier)
+  };
+};
+
 export interface PeerMessageInput {
   body: string;
   targetPeerId?: string;
@@ -303,7 +312,8 @@ export const parsePeerMessageInput = (value: unknown): PeerMessageInput => {
 
 export const parseRoomState = (value: unknown): RoomState => {
   const input = assertInputRecord(value, 'room');
-  assertKnownKeys(input, 'room', ['roomName', 'joined', 'udpPort', 'tcpPort']);
+  assertKnownKeys(input, 'room', ['roomName', 'roomId', 'joined', 'udpPort', 'tcpPort']);
+  const roomId = parseOptionalText(input, 'roomId', VALIDATION_LIMITS.roomFingerprint);
 
   const roomName = requiredValue(input, 'room', 'roomName');
   if (roomName !== null && typeof roomName !== 'string') {
@@ -320,6 +330,7 @@ export const parseRoomState = (value: unknown): RoomState => {
       roomName === null
         ? null
         : normalizeText(roomName, 'roomName', VALIDATION_LIMITS.roomName),
+    ...(roomId === undefined ? {} : { roomId }),
     joined: joinedValue as boolean,
     udpPort: normalizePort(requiredValue(input, 'room', 'udpPort'), 'udpPort'),
     tcpPort: normalizePort(requiredValue(input, 'room', 'tcpPort'), 'tcpPort')
@@ -409,26 +420,32 @@ export const parsePeer = (value: unknown): Peer => {
 
 export const parseCreateConversationInput = (value: unknown): CreateConversationInput => {
   const input = assertInputRecord(value, 'conversation');
-  assertKnownKeys(input, 'conversation', ['id', 'kind', 'title', 'peerId']);
+  assertKnownKeys(input, 'conversation', ['id', 'kind', 'title', 'peerId', 'roomId', 'roomName']);
 
   const id = parseOptionalText(input, 'id', VALIDATION_LIMITS.conversationId);
   const peerId = parseOptionalText(input, 'peerId', VALIDATION_LIMITS.identifier);
+  const roomId = parseOptionalText(input, 'roomId', VALIDATION_LIMITS.roomFingerprint);
+  const roomName = parseOptionalText(input, 'roomName', VALIDATION_LIMITS.roomName);
 
   return {
     ...(id === undefined ? {} : { id }),
     kind: parseEnum(requiredValue(input, 'conversation', 'kind'), 'kind', CONVERSATION_KINDS),
     title: normalizeText(requiredValue(input, 'conversation', 'title'), 'title', VALIDATION_LIMITS.roomName),
-    ...(peerId === undefined ? {} : { peerId })
+    ...(peerId === undefined ? {} : { peerId }),
+    ...(roomId === undefined ? {} : { roomId }),
+    ...(roomName === undefined ? {} : { roomName })
   };
 };
 
 export const parseCreateMessageInput = (value: unknown): CreateMessageInput => {
   const input = assertInputRecord(value, 'message');
-  assertKnownKeys(input, 'message', ['id', 'conversationId', 'body', 'author', 'deliveryState', 'createdAt']);
+  assertKnownKeys(input, 'message', ['id', 'conversationId', 'body', 'author', 'senderPeerId', 'senderName', 'deliveryState', 'createdAt']);
 
   const id = parseOptionalText(input, 'id', VALIDATION_LIMITS.identifier);
   const deliveryState = optionalValue(input, 'deliveryState');
   const createdAt = optionalValue(input, 'createdAt');
+  const senderPeerId = parseOptionalText(input, 'senderPeerId', VALIDATION_LIMITS.identifier);
+  const senderName = parseOptionalText(input, 'senderName', VALIDATION_LIMITS.displayName);
 
   return {
     ...(id === undefined ? {} : { id }),
@@ -443,6 +460,8 @@ export const parseCreateMessageInput = (value: unknown): CreateMessageInput => {
       VALIDATION_LIMITS.messageBody
     ),
     author: parseEnum(requiredValue(input, 'message', 'author'), 'author', MESSAGE_AUTHORS),
+    ...(senderPeerId === undefined ? {} : { senderPeerId }),
+    ...(senderName === undefined ? {} : { senderName }),
     ...(deliveryState === undefined
       ? {}
       : { deliveryState: parseEnum(deliveryState, 'deliveryState', MESSAGE_DELIVERY_STATES) }),

@@ -21,6 +21,5 @@
     },
     "types": ["node", "vitest/globals"]
   },
-  "include": ["electron.vite.config.ts", "vitest.config.ts", "src/**/*.ts", "src/**/*.tsx"]
+  "include": ["electron.vite.config.ts", "vitest.config.ts", "scripts/desktop-smoke.ts", "src/**/*.ts", "src/**/*.tsx"]
 }
-
